@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 import concurrent.futures
 import sys
+import uuid
 
 # Force socket to resolve IPv4 only to avoid slow AAAA (IPv6) DNS resolution timeouts (e.g. in WSL)
 _orig_getaddrinfo = socket.getaddrinfo
@@ -56,9 +57,10 @@ STATE_FILE = DATA_DIR / "state.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 
 lock = threading.RLock()
+active_sessions: dict[str, float] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
-is_connecting = False
+is_connecting = True
 last_active_ping_time = 0.0
 last_active_latency = 0
 
@@ -762,7 +764,11 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         
     return list(updated_nodes_map.values())
 
-def auto_switch_node() -> None:
+def auto_switch_node(attempt: int = 0) -> None:
+    if attempt >= 3:
+        print("[自动切换] 连续切换失败已达 3 次，停止切换以防止主线程死锁，将在后台重新加载节点...", flush=True)
+        return
+        
     # Find the next best available node
     with lock:
         nodes = read_json(NODES_FILE, [])
@@ -784,7 +790,7 @@ def auto_switch_node() -> None:
             err_msg = f"切换到备用节点 {next_node['id']} 失败: {e}，将尝试下一个..."
             print(f"[自动切换] {err_msg}", flush=True)
             log_to_json("WARNING", "VPN", err_msg)
-            auto_switch_node()
+            auto_switch_node(attempt + 1)
     else:
         msg = "没有可用的备选节点，将自动断开并清理当前连接状态，同时在后台异步获取新节点..."
         print(f"[自动切换] {msg}", flush=True)
@@ -885,99 +891,121 @@ def connect_node(node_id: str) -> str:
             is_connecting = False
 
 def maintain_valid_nodes(force: bool = False) -> str:
-    global active_openvpn_process, active_openvpn_node_id
+    global active_openvpn_process, active_openvpn_node_id, is_connecting
     ensure_dirs()
-    if force:
-        with lock:
-            stop_active_openvpn()
-    elif not active_openvpn_running():
-        has_active_id = False
-        with lock:
-            if active_openvpn_node_id:
-                has_active_id = True
-                stop_active_openvpn()
-        if has_active_id:
-            print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
-            auto_switch_node()
-
+    is_connecting = True
     try:
-        candidates = fetch_candidates()
-    except Exception as exc:
-        vpn_utils.check_and_fix_dns()
-        try:
-            candidates = fetch_candidates()
-        except Exception as exc2:
-            set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=str(exc2))
-            candidates = []
-
-    if not candidates:
-        return "没有拉取到新节点"
-
-    with lock:
-        active_node = None
-        if active_openvpn_node_id:
-            current_nodes = read_json(NODES_FILE, [])
-            active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
-            
-        merged: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        
-        if active_node:
-            merged.append(active_node)
-            seen_ids.add(active_node["id"])
-            
-        for cand in candidates:
-            if cand["id"] not in seen_ids:
-                merged.append(cand)
-                seen_ids.add(cand["id"])
-                
-        if len(merged) > 1000:
-            merged = merged[:1000]
-            
-        for n in merged:
-            config_path = Path(n["config_file"])
-            if not config_path.exists():
-                try:
-                    config_path.write_text(n["config_text"], encoding="utf-8")
-                except Exception:
-                    pass
-                    
-        write_json(NODES_FILE, merged)
-
-    # Test the first 10 non-active nodes from the new list
-    with lock:
-        current_nodes = read_json(NODES_FILE, [])
-        to_test = [n for n in current_nodes if not n.get("active")][:10]
-        to_test_ids = [n["id"] for n in to_test]
-        
-    print(f"[维护线程] 正在检测新获取列表的前 10 个节点: {to_test_ids}", flush=True)
-    test_multiple_nodes(to_test_ids)
-    
-    with lock:
-        merged = read_json(NODES_FILE, [])
-        if not active_openvpn_running():
-            available_candidates = [n for n in merged if n.get("probe_status") == "available"]
-            if available_candidates:
+        if force:
+            with lock:
+                stop_active_openvpn()
+        elif not active_openvpn_running():
+            has_active_id = False
+            with lock:
+                if active_openvpn_node_id:
+                    has_active_id = True
+                    stop_active_openvpn()
+            if has_active_id:
+                print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
+                is_connecting = False
                 auto_switch_node()
+                is_connecting = True
 
-    valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
-    message = f"Fetched {len(candidates)} nodes. Tested first 10 nodes."
-    set_state(
-        last_check_at=time.time(),
-        last_check_message=message,
-        active_openvpn_node_id=active_openvpn_node_id,
-        valid_nodes=valid_nodes_count,
-    )
-    return message
+        try:
+            set_state(is_connecting=True, last_check_message="正在拉取最新的免费 VPN 节点列表...")
+            candidates = fetch_candidates()
+        except Exception as exc:
+            vpn_utils.check_and_fix_dns()
+            try:
+                set_state(is_connecting=True, last_check_message="解析失败重试：正在拉取最新的免费 VPN 节点列表...")
+                candidates = fetch_candidates()
+            except Exception as exc2:
+                set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=str(exc2))
+                candidates = []
+
+        if not candidates:
+            is_connecting = False
+            return "没有拉取到新节点"
+
+        with lock:
+            active_node = None
+            if active_openvpn_node_id:
+                current_nodes = read_json(NODES_FILE, [])
+                active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
+                
+            merged: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            
+            if active_node:
+                merged.append(active_node)
+                seen_ids.add(active_node["id"])
+                
+            for cand in candidates:
+                if cand["id"] not in seen_ids:
+                    merged.append(cand)
+                    seen_ids.add(cand["id"])
+                    
+            if len(merged) > 1000:
+                merged = merged[:1000]
+                
+            for n in merged:
+                config_path = Path(n["config_file"])
+                if not config_path.exists():
+                    try:
+                        config_path.write_text(n["config_text"], encoding="utf-8")
+                    except Exception:
+                        pass
+                        
+            write_json(NODES_FILE, merged)
+
+        # Test the first 10 non-active nodes from the new list
+        with lock:
+            current_nodes = read_json(NODES_FILE, [])
+            to_test = [n for n in current_nodes if not n.get("active")][:10]
+            to_test_ids = [n["id"] for n in to_test]
+            
+        print(f"[维护线程] 正在检测新获取列表的前 10 个节点: {to_test_ids}", flush=True)
+        set_state(is_connecting=True, last_check_message="正在并发检测筛选可用节点，这可能需要 5-30 秒...")
+        test_multiple_nodes(to_test_ids)
+        
+        is_connecting = False
+        
+        with lock:
+            merged = read_json(NODES_FILE, [])
+            if not active_openvpn_running():
+                available_candidates = [n for n in merged if n.get("probe_status") == "available"]
+                if available_candidates:
+                    auto_switch_node()
+
+        valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
+        message = f"Fetched {len(candidates)} nodes. Tested first 10 nodes."
+        set_state(
+            last_check_at=time.time(),
+            last_check_message=message,
+            active_openvpn_node_id=active_openvpn_node_id,
+            valid_nodes=valid_nodes_count,
+        )
+        return message
+    except Exception as e:
+        is_connecting = False
+        raise e
 
 
 def collector_loop() -> None:
     while True:
+        success = False
         try:
-            maintain_valid_nodes(force=False)
+            res = maintain_valid_nodes(force=False)
+            if "没有拉取到新节点" not in res:
+                success = True
         except Exception as exc:
             set_state(last_check_at=time.time(), last_check_message=f"check error: {exc}")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+            
+        if not active_openvpn_running() and not success:
+            sleep_time = 30
+        else:
+            sleep_time = CHECK_INTERVAL_SECONDS
+            
+        time.sleep(sleep_time)
 
 LOGIN_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -3177,7 +3205,6 @@ class Handler(BaseHTTPRequestHandler):
     def is_authorized(self) -> bool:
         ui_cfg = load_ui_config()
         pwd = ui_cfg.get("password")
-        uname = ui_cfg.get("username", "admin")
         if not pwd:
             return True
         
@@ -3190,8 +3217,15 @@ class Handler(BaseHTTPRequestHandler):
                     k, v = item.split("=", 1)
                     cookies[k.strip()] = v.strip()
         
-        expected_token = get_session_token(pwd, uname)
-        return cookies.get("session") == expected_token
+        session_token = cookies.get("session")
+        if not session_token:
+            return False
+            
+        with lock:
+            exp_time = active_sessions.get(session_token)
+            if exp_time is not None and exp_time > time.time():
+                return True
+        return False
 
     def validate_path(self) -> str:
         secret_path = self.get_secret_path()
@@ -3299,7 +3333,9 @@ class Handler(BaseHTTPRequestHandler):
                 expected_uname = ui_cfg.get("username", "admin")
                 
                 if expected_pwd and input_pwd == expected_pwd and input_uname == expected_uname:
-                    token = get_session_token(expected_pwd, expected_uname)
+                    token = uuid.uuid4().hex
+                    with lock:
+                        active_sessions[token] = time.time() + 30 * 24 * 3600
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     secret_path = self.get_secret_path()
@@ -3315,6 +3351,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if effective_path == "/api/logout":
             try:
+                cookie_header = self.headers.get("Cookie", "")
+                cookies = {}
+                if cookie_header:
+                    for item in cookie_header.split(";"):
+                        item = item.strip()
+                        if "=" in item:
+                            k, v = item.split("=", 1)
+                            cookies[k.strip()] = v.strip()
+                session_token = cookies.get("session")
+                if session_token:
+                    with lock:
+                        active_sessions.pop(session_token, None)
                 secret_path = self.get_secret_path()
                 cookie_path = f"/{secret_path}/" if secret_path else "/"
                 self.send_response(HTTPStatus.OK)
@@ -3502,7 +3550,9 @@ def main() -> None:
             "local_proxy": f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}",
             "active_openvpn_node_id": "",
             "last_fetch_status": "starting",
-            "last_check_message": "service starting",
+            "last_check_message": "服务已启动，正在初始化网络并获取候选 VPN 节点...",
+            "is_connecting": True,
+            "active_node_latency": "正在准备",
             "blacklisted_nodes": 0,
         },
     )

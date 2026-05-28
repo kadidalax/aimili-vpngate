@@ -306,6 +306,9 @@ def format_line(label, value, target_width=26):
     padding = " " * max(0, target_width - w)
     return f"{prefix}{label}{padding}:  {value}"
 
+def print_line(text=""):
+    print(f"{text}\033[K")
+
 def print_status():
     cfg = load_ui_cfg()
     ui_port = cfg.get("port", 8787)
@@ -336,36 +339,36 @@ def print_status():
         gateway_status = f"{green}[已激活]{reset}" if gateway_ok else f"{red}[未启动]{reset}"
         openvpn_status = f"{green}[已连接]{reset}" if openvpn_ok else f"{red}[未连接]{reset}"
     
-    print("=======================================================")
-    print(f"               {bold}AimiliVPN 管理终端 v2.0{reset}                  ")
-    print("=======================================================")
-    print("【核心服务状态】")
-    print(format_line("代理网关 (Port 7928)", gateway_status))
-    print(format_line(f"管理后台 (Port {ui_port})", backend_status))
-    print(format_line("连接核心 (OpenVPN)", openvpn_status))
+    print_line("=======================================================")
+    print_line(f"               {bold}AimiliVPN 管理终端 v2.0{reset}                  ")
+    print_line("=======================================================")
+    print_line("【核心服务状态】")
+    print_line(format_line("代理网关 (Port 7928)", gateway_status))
+    print_line(format_line(f"管理后台 (Port {ui_port})", backend_status))
+    print_line(format_line("连接核心 (OpenVPN)", openvpn_status))
     
     login_ip = "127.0.0.1" if cfg.get("host") == "127.0.0.1" else get_public_ip()
-    print(format_line("网页登录地址", f"{yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}"))
-    print(format_line("网页管理账号", cfg.get("username", "未配置")))
+    print_line(format_line("网页登录地址", f"{yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}"))
+    print_line(format_line("网页管理账号", cfg.get("username", "未配置")))
     curr_pwd = cfg.get("password", "")
     masked_pwd = curr_pwd if len(curr_pwd) <= 4 else curr_pwd[:3] + "********" + curr_pwd[-2:]
-    print(format_line("网页管理密码", masked_pwd))
-    print()
-    print("【活动节点状态】")
+    print_line(format_line("网页管理密码", masked_pwd))
+    print_line()
+    print_line("【活动节点状态】")
     if is_connecting:
         connecting_msg = state.get('last_check_message') or '正在建立加密隧道并验证路由规则...'
-        print(format_line("节点状态", f"{yellow}{connecting_msg}{reset}"))
+        print_line(format_line("节点状态", f"{yellow}{connecting_msg}{reset}"))
     elif active_ip:
-        print(format_line("节点 IP", active_ip))
-        print(format_line("节点地区", active_loc))
-        print(format_line("节点延迟 (直连测试)", latency))
+        print_line(format_line("节点 IP", active_ip))
+        print_line(format_line("节点地区", active_loc))
+        print_line(format_line("节点延迟 (直连测试)", latency))
     else:
-        print(format_line("节点状态", "无活动连接"))
-    print()
-    print("【使用方法】")
-    print(f"  export http_proxy=socks5://127.0.0.1:7928")
-    print(f"  export https_proxy=socks5://127.0.0.1:7928")
-    print("=======================================================")
+        print_line(format_line("节点状态", "无活动连接"))
+    print_line()
+    print_line("【使用方法】")
+    print_line(f"  export http_proxy=socks5://127.0.0.1:7928")
+    print_line(f"  export https_proxy=socks5://127.0.0.1:7928")
+    print_line("=======================================================")
 
 def start_service():
     print("正在启动 AimiliVPN 服务...", flush=True)
@@ -669,18 +672,24 @@ def main():
         elif cmd == "restart":
             restart_service()
         elif cmd == "status":
+            print("\033[?1049h\033[?25l\033[H\033[J", end="", flush=True)
             try:
                 last_state = None
                 while True:
                     current_state = get_status_state()
                     if current_state != last_state:
-                        print("\033[H\033[J", end="")
+                        print("\033[H", end="")
                         print_status()
-                        print("\n提示: 正在实时监控状态，自动更新。按 Ctrl+C 退出...")
+                        print_line("\n\033[1;33m提示: 正在实时监控状态，自动更新。按任意键或 Ctrl+C 退出...\033[0m")
+                        print("\033[J", end="", flush=True)
                         last_state = current_state
-                    time.sleep(2.0)
+                    key = getch_timeout(1.5)
+                    if key is not None:
+                        break
             except KeyboardInterrupt:
                 pass
+            finally:
+                print("\033[?1049l\033[?25h", end="", flush=True)
         elif cmd == "logs":
             show_logs()
         elif cmd == "update":
@@ -710,63 +719,74 @@ def main():
         '0': ("退出终端", None)
     }
     
-    last_state = None
-    while True:
-        current_state = get_status_state()
-        if current_state != last_state:
-            print("\033[H\033[J", end="")
-            print_status()
-            
-            bold = "\033[1m"
-            reset = "\033[0m"
-            green = "\033[1;32m"
-            
-            print(f"【{bold}终端指令菜单栏{reset}】")
-            for key in sorted(options.keys()):
-                if key == '0':
-                    continue
-                name, _ = options[key]
-                print(f"  {green}[{key}]{reset} {name}")
-            print(f"  {green}[0]{reset} {options['0'][0]}")
-            print("=======================================================")
-            print("请直接输入数字键 [0-9] 快速选择执行：", end="", flush=True)
-            last_state = current_state
-            
-        try:
-            key = getch()
-        except KeyboardInterrupt:
-            print()
-            break
-            
-        if key == '\x03':
-            print()
-            break
-            
-        # '0' 键默认退出终端，并打印换行符以保持 Shell 提示符整洁
-        if key == '0':
-            print()
-            break
-            
-        # 回车键 (\r 或 \n) 用于手动刷新当前菜单与连接状态
-        if key in ('\r', '\n', '\x0a', '\x0d'):
-            pass
-            
-        # Reset last_state to force redraw after any key input
+    # Enter alternate buffer and hide cursor
+    print("\033[?1049h\033[?25l\033[H\033[J", end="", flush=True)
+    try:
         last_state = None
-        
-        if key in options:
-            name, func = options[key]
-            if func is None:
-                print()
+        while True:
+            current_state = get_status_state()
+            if current_state != last_state:
+                print("\033[H", end="")
+                print_status()
+                
+                bold = "\033[1m"
+                reset = "\033[0m"
+                green = "\033[1;32m"
+                
+                print_line(f"【{bold}终端指令菜单栏{reset}】")
+                for key in sorted(options.keys()):
+                    if key == '0':
+                        continue
+                    name, _ = options[key]
+                    print_line(f"  {green}[{key}]{reset} {name}")
+                print_line(f"  {green}[0]{reset} {options['0'][0]}")
+                print_line("=======================================================")
+                print("请直接输入数字键 [0-9] 快速选择执行：\033[K", end="", flush=True)
+                print("\033[J", end="", flush=True)
+                last_state = current_state
+                
+            try:
+                key = getch_timeout(1.0)
+            except KeyboardInterrupt:
                 break
-            print("\033[H\033[J", end="")
-            print(f"正在执行: {name}...\n")
-            func()
-            if func in (start_service, stop_service, restart_service):
+                
+            if key is None:
                 continue
-            if func in (configure_web, configure_port, configure_credentials, show_logs, update_service):
+                
+            if key == '\x03' or key == 'q' or key == 'Q':
+                break
+                
+            if key == '0':
+                break
+                
+            if key in ('\r', '\n', '\x0a', '\x0d'):
+                last_state = None
                 continue
-            input("\n操作已完成，按回车键返回主菜单...")
+                
+            if key in options:
+                name, func = options[key]
+                if func is None:
+                    break
+                    
+                # Temporarily restore normal terminal scrollback and show cursor
+                print("\033[?1049l\033[?25h", end="", flush=True)
+                print(f"正在执行: {name}...\n")
+                
+                try:
+                    func()
+                except Exception as e:
+                    print(f"执行出错: {e}")
+                    
+                if func not in (start_service, stop_service, restart_service,
+                                configure_web, configure_port, configure_credentials, show_logs, update_service):
+                    input("\n操作已完成，按回车键返回主菜单...")
+                    
+                # Re-enter alternate buffer and hide cursor
+                print("\033[?1049h\033[?25l\033[H\033[J", end="", flush=True)
+                last_state = None
+    finally:
+        # Exit alternate buffer and show cursor on exit
+        print("\033[?1049l\033[?25h", end="", flush=True)
 
 if __name__ == "__main__":
     main()

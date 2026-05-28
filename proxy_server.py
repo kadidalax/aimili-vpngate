@@ -22,8 +22,103 @@ def recv_exact(sock: socket.socket, size: int) -> bytes:
         data += chunk
     return data
 
+def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float = 3.0) -> str | None:
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+
+    import random
+    tx_id = random.getrandbits(16).to_bytes(2, "big")
+    flags = b"\x01\x00"
+    questions = b"\x00\x01"
+    rrs = b"\x00\x00\x00\x00\x00\x00"
+
+    qname = b""
+    for part in host.split("."):
+        if not part:
+            continue
+        part_bytes = part.encode("idna")
+        qname += len(part_bytes).to_bytes(1, "big") + part_bytes
+    qname += b"\x00"
+
+    qtype_qclass = b"\x00\x01\x00\x01"
+    packet = tx_id + flags + questions + rrs + qname + qtype_qclass
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(timeout)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0")
+        except OSError:
+            return None
+        sock.sendto(packet, (dns_server, 53))
+        resp, _ = sock.recvfrom(2048)
+    except Exception:
+        return None
+    finally:
+        sock.close()
+
+    if len(resp) < 12:
+        return None
+    if resp[:2] != tx_id:
+        return None
+
+    rcode = resp[3] & 0x0F
+    if rcode != 0:
+        return None
+
+    offset = 12
+    while offset < len(resp):
+        length = resp[offset]
+        if length == 0:
+            offset += 1
+            break
+        elif (length & 0xC0) == 0xC0:
+            offset += 2
+            break
+        else:
+            offset += 1 + length
+
+    offset += 4
+    answers_count = int.from_bytes(resp[6:8], "big")
+    if answers_count == 0:
+        return None
+
+    for _ in range(answers_count):
+        if offset >= len(resp):
+            break
+        while offset < len(resp):
+            length = resp[offset]
+            if length == 0:
+                offset += 1
+                break
+            elif (length & 0xC0) == 0xC0:
+                offset += 2
+                break
+            else:
+                offset += 1 + length
+        if offset + 10 > len(resp):
+            break
+        atype = int.from_bytes(resp[offset : offset + 2], "big")
+        aclass = int.from_bytes(resp[offset + 2 : offset + 4], "big")
+        rdlength = int.from_bytes(resp[offset + 8 : offset + 10], "big")
+        offset += 10
+        if offset + rdlength > len(resp):
+            break
+        if atype == 1 and aclass == 1 and rdlength == 4:
+            ip_bytes = resp[offset : offset + 4]
+            return socket.inet_ntoa(ip_bytes)
+        offset += rdlength
+    return None
+
 def create_connection(address: tuple[str, int], timeout: float = 20) -> socket.socket:
     host, port = address
+    resolved_ip = resolve_dns_over_tun0(host)
+    if resolved_ip:
+        host = resolved_ip
+
     err = None
     for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         af, socktype, proto, canonname, sa = res
@@ -76,7 +171,14 @@ def socks5_client(client: socket.socket, first_byte: bytes) -> None:
             client.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
             return
         port = int.from_bytes(recv_exact(client, 2), "big")
-        upstream = create_connection((host, port), timeout=20)
+        try:
+            upstream = create_connection((host, port), timeout=20)
+        except Exception:
+            try:
+                client.sendall(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
+            except OSError:
+                pass
+            raise
         client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
         relay(client, upstream)
     finally:
