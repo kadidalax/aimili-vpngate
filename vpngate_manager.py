@@ -562,7 +562,8 @@ def setup_policy_routing(interface: str = "tun0") -> None:
             time.sleep(1)
             
     if not success:
-        print("[policy_routing] Failed to enable policy routing after 3 attempts", flush=True)
+        print("[路由配置失败] [错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由，这可能会导致通过 VPN 接口的出站路由无法正常解析。请检查系统是否支持策略路由、iproute2 工具是否完整，以及是否具有 root 权限。", flush=True)
+        log_to_json("ERROR", "Routing", "[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由")
 
 def cleanup_policy_routing() -> None:
     try:
@@ -902,6 +903,7 @@ def connect_node(node_id: str) -> str:
                 item["active"] = False
             write_json(NODES_FILE, nodes)
             log_to_json("ERROR", "VPN", f"连接节点 {node_id} 失败: {message}")
+            print(f"[连接核心失败] 无法与 VPN 节点 {node_id} 建立隧道连接！详情: {message}", flush=True)
             set_state(active_openvpn_node_id="", is_connecting=False, active_node_latency="无活动连接", last_check_message=f"连接失败: {message}")
             with lock:
                 active_openvpn_node_id = ""
@@ -1467,6 +1469,7 @@ INDEX_HTML = r"""<!doctype html>
       gap: 6px;
       background: rgba(255, 255, 255, 0.04);
       color: var(--text-primary);
+      white-space: nowrap;
     }
 
     button:hover {
@@ -2039,6 +2042,14 @@ INDEX_HTML = r"""<!doctype html>
       .btn-group button {
         flex: 1;
       }
+      .btn-group .dropdown {
+        flex: 1;
+        display: flex;
+      }
+      .btn-group .dropdown button {
+        width: 100%;
+        flex: 1;
+      }
       main {
         padding: 16px 20px;
       }
@@ -2184,7 +2195,7 @@ INDEX_HTML = r"""<!doctype html>
       <button id="admin_btn" class="btn-primary" style="background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border-color); color: var(--text-primary);">
         <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
         管理员
-        <svg xmlns="http://www.w3.org/2000/svg; width:12px; height:12px; margin-left: 2px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" style="width:12px; height:12px; margin-left: 2px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
       </button>
       <div id="admin_dropdown" class="dropdown-content">
         <a href="javascript:void(0)" onclick="openSettingsModal()">
