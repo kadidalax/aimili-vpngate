@@ -279,7 +279,7 @@ def get_state() -> dict[str, Any]:
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
     _proxy_display = f"[{LOCAL_PROXY_HOST}]" if ":" in LOCAL_PROXY_HOST else LOCAL_PROXY_HOST
-    state.setdefault("local_proxy", f"http://{_proxy_display}:{LOCAL_PROXY_PORT}")
+    state["local_proxy"] = f"http://{_proxy_display}:{LOCAL_PROXY_PORT}"
     state.setdefault("last_fetch_status", "not_started")
     state.setdefault("last_check_message", "")
     state.setdefault("blacklisted_nodes", 0)
@@ -289,6 +289,7 @@ def get_state() -> dict[str, Any]:
     state["username"] = ui_cfg.get("username", "admin")
     state["port"] = ui_cfg.get("port", 8787)
     state["secret_path"] = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
+    state["proxy_port"] = ui_cfg.get("proxy_port", 7928)
     state["routing_mode"] = ui_cfg.get("routing_mode", "auto")
     state["force_country"] = ui_cfg.get("force_country", "")
     
