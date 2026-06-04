@@ -1023,7 +1023,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         return temp_node
 
     updated_nodes_map = {}
-    max_workers = min(80, max(1, len(to_test)))
+    max_workers = min(30, max(1, len(to_test)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(test_worker, (idx, n)): n["id"] for idx, n in enumerate(to_test)}
         for future in concurrent.futures.as_completed(futures):
@@ -1247,17 +1247,30 @@ def maintain_valid_nodes(force: bool = False) -> str:
             ui_cfg = load_ui_config()
             routing_mode = ui_cfg.get("routing_mode", "auto")
             connection_enabled = ui_cfg.get("connection_enabled", True)
-            if connection_enabled and routing_mode != "fixed_ip":
-                has_active_id = False
-                with lock:
-                    if active_openvpn_node_id:
-                        has_active_id = True
-                        stop_active_openvpn()
-                if has_active_id:
-                    print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
-                    is_connecting = False
-                    auto_switch_node()
-                    is_connecting = True
+            if connection_enabled:
+                if routing_mode == "fixed_ip":
+                    target_id = active_openvpn_node_id or ui_cfg.get("fixed_node_id", "")
+                    if target_id:
+                        nodes = read_json(NODES_FILE, [])
+                        if any(n.get("id") == target_id for n in nodes):
+                            print(f"[维护线程] 检测到固定 IP 模式下 OpenVPN 未运行，正在重新拉起同一节点: {target_id}", flush=True)
+                            is_connecting = False
+                            try:
+                                connect_node(target_id)
+                            except Exception as e:
+                                print(f"[维护线程] 重新拉起固定节点 {target_id} 失败: {e}", flush=True)
+                            is_connecting = True
+                else:
+                    has_active_id = False
+                    with lock:
+                        if active_openvpn_node_id:
+                            has_active_id = True
+                            stop_active_openvpn()
+                    if has_active_id:
+                        print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
+                        is_connecting = False
+                        auto_switch_node()
+                        is_connecting = True
 
         try:
             set_state(is_connecting=True, last_check_message="正在拉取最新的免费 VPN 节点列表...")
@@ -3486,6 +3499,13 @@ function updateHeaderRoutingControls() {
     selectCountry.value = "";
   }
   
+  if (state.routing_mode !== "fixed_ip") {
+    const fixedIpOpt = selectCountry.querySelector('option[value="fixed_ip_mode"]');
+    if (fixedIpOpt) {
+      fixedIpOpt.remove();
+    }
+  }
+  
   selectIpType.value = state.routing_ip_type || "all";
 }
 
@@ -4213,6 +4233,13 @@ def background_proxy_checker() -> None:
                                 active_node["probe_status"] = "unavailable"
                                 write_json(NODES_FILE, nodes)
                         auto_switch_node()
+                    else:
+                        print(f"[代理守护线程] 固定 IP 模式下代理不可用，正在尝试重启连接同一节点: {active_openvpn_node_id}", flush=True)
+                        is_connecting = False
+                        try:
+                            connect_node(active_openvpn_node_id)
+                        except Exception as e:
+                            print(f"[代理守护线程] 重启固定节点失败: {e}", flush=True)
         except Exception as e:
             print(f"[错误] 代理后台检测发生异常: {e}", flush=True)
             log_to_json("ERROR", "Proxy", f"检测守护线程发生异常: {e}")

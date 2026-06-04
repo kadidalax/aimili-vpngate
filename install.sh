@@ -29,7 +29,7 @@ case "$OS_TYPE" in
     alpine)
         PKG_MGR="apk"
         ;;
-    centos|rhel|rocky|almalinux|fedora)
+    centos|rhel|rocky|almalinux|fedora|ol|amzn)
         if command -v dnf >/dev/null 2>&1; then
             PKG_MGR="dnf"
         else
@@ -37,7 +37,7 @@ case "$OS_TYPE" in
         fi
         ;;
     *)
-        echo -e "${RED}错误: 不支持的操作系统 ($OS_TYPE)！目前仅支持 Ubuntu/Debian/Alpine/CentOS/RHEL/Rocky/AlmaLinux/Fedora。${PLAIN}"
+        echo -e "${RED}错误: 不支持的操作系统 ($OS_TYPE)！目前仅支持 Ubuntu/Debian/Alpine/CentOS/RHEL/Rocky/AlmaLinux/Fedora/OracleLinux/AmazonLinux。${PLAIN}"
         exit 1
         ;;
 esac
@@ -71,7 +71,7 @@ elif [ "$PKG_MGR" = "apk" ]; then
     apk add openvpn curl git ca-certificates iptables iproute2 psmisc python3 bash
 elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     echo -e "  -> 正在运行 $PKG_MGR 安装基础依赖包..."
-    if [ "$OS_TYPE" != "fedora" ]; then
+    if [ "$OS_TYPE" != "fedora" ] && [ "$OS_TYPE" != "amzn" ]; then
         echo -e "     -> 正在安装 EPEL 软件源 (以支持 openvpn)..."
         $PKG_MGR install -y epel-release || true
     fi
