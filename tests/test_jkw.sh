@@ -12,6 +12,7 @@ grep -q '整机全走家宽' <<<"$output"
 grep -q '撤销全部改动并恢复原设置' <<<"$output"
 grep -q '卸载本工具并彻底清理' <<<"$output"
 ! grep -qE '\b(Status|Install|Uninstall|Enable|Disable|Exit|Error)\b' <<<"$output"
+! grep -q '确认撤销' jkw.sh
 
 if JKW_TEST_ROOT="$ROOT" bash ./jkw.sh --测试依赖 >"$ROOT/out" 2>&1; then
   echo '缺失组件时不应返回成功'

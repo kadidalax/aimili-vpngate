@@ -35,7 +35,7 @@ class SpeedConfigTests(unittest.TestCase):
 
     def test_speed_config_defaults(self):
         cfg = self.app.load_ui_config()
-        self.assertIs(cfg["speed_test_enabled"], True)
+        self.assertIs(cfg["speed_test_enabled"], False)
         self.assertEqual(cfg["speed_test_interval"], 3600)
         self.assertEqual(cfg["speed_test_min_bytes"], 10 * 1024 * 1024)
         self.assertEqual(cfg["speed_test_url"], self.app.DEFAULT_SPEED_TEST_URL)
@@ -62,7 +62,7 @@ class SpeedConfigTests(unittest.TestCase):
             speed_test_favorites_only="yes",
         )
         cfg = self.app.load_ui_config()
-        self.assertIs(cfg["speed_test_enabled"], True)
+        self.assertIs(cfg["speed_test_enabled"], False)
         self.assertEqual(cfg["speed_test_interval"], 3600)
         self.assertEqual(cfg["speed_test_min_bytes"], 10 * 1024 * 1024)
         self.assertEqual(cfg["speed_test_url"], self.app.DEFAULT_SPEED_TEST_URL)
@@ -70,6 +70,15 @@ class SpeedConfigTests(unittest.TestCase):
         self.assertEqual(cfg["speed_test_ip_type"], "all")
         self.assertEqual(cfg["speed_test_status"], "all")
         self.assertIs(cfg["speed_test_favorites_only"], False)
+
+    def test_stop_speed_test_marks_running_job_for_cancellation(self):
+        self.app.speed_test_cancel.clear()
+        self.app.speed_test_lock.acquire()
+        try:
+            self.assertIs(self.app.stop_speed_test(), True)
+            self.assertTrue(self.app.speed_test_cancel.is_set())
+        finally:
+            self.app.speed_test_lock.release()
 
     def test_speed_config_normalizes_country_and_url(self):
         self.write_config(

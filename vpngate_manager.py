@@ -155,6 +155,7 @@ lock = threading.RLock()
 maintenance_lock = threading.Lock()
 speed_test_lock = threading.Lock()
 speed_test_trigger = threading.Event()
+speed_test_cancel = threading.Event()
 speed_test_request_lock = threading.Lock()
 speed_test_run_requested = False
 active_sessions: dict[str, float] = {}
@@ -255,7 +256,7 @@ def load_ui_config() -> dict[str, Any]:
             "fixed_node_id": "",
             "favorite_node_ids": [],
             "fav_fail_fallback": False,
-            "speed_test_enabled": True,
+            "speed_test_enabled": False,
             "speed_test_interval": 3600,
             "speed_test_min_bytes": 10 * 1024 * 1024,
             "speed_test_url": DEFAULT_SPEED_TEST_URL,
@@ -301,7 +302,7 @@ def load_ui_config() -> dict[str, Any]:
 
         normalized_speed_enabled = config.get("speed_test_enabled")
         if not isinstance(normalized_speed_enabled, bool):
-            normalized_speed_enabled = True
+            normalized_speed_enabled = False
         if normalized_speed_enabled != config.get("speed_test_enabled"):
             config["speed_test_enabled"] = normalized_speed_enabled
             updated = True
@@ -1505,9 +1506,16 @@ def current_connection_operation_version() -> int:
 
 def request_speed_test_run() -> None:
     global speed_test_run_requested
+    speed_test_cancel.clear()
     with speed_test_request_lock:
         speed_test_run_requested = True
     speed_test_trigger.set()
+
+def stop_speed_test() -> bool:
+    if not speed_test_lock.locked():
+        return False
+    speed_test_cancel.set()
+    return True
 
 def consume_speed_test_request() -> bool:
     global speed_test_run_requested
@@ -1825,6 +1833,7 @@ def speed_test_once() -> dict[str, Any]:
         return {"ok": False, "error": "测速任务正在运行"}
     maintenance_acquired = False
     try:
+        speed_test_cancel.clear()
         maintenance_acquired = maintenance_lock.acquire(blocking=False)
         if not maintenance_acquired:
             return {"ok": False, "error": "节点维护任务正在运行，请稍后再试"}
@@ -1848,6 +1857,9 @@ def speed_test_once() -> dict[str, Any]:
         failed = 0
         skipped = 0
         for completed, node in enumerate(targets, 1):
+            if speed_test_cancel.is_set():
+                skipped += len(targets) - completed + 1
+                break
             node_id = node.get("id")
             set_state(speed_test_current_node_id=node_id or "")
             with lock:
@@ -1877,11 +1889,12 @@ def speed_test_once() -> dict[str, Any]:
                     skipped += 1
             set_state(speed_test_completed=completed)
 
-        fastest = fastest_speed_result(results)
+        cancelled = speed_test_cancel.is_set()
+        fastest = None if cancelled else fastest_speed_result(results)
         fastest_id = str(fastest.get("id") or "") if fastest else ""
-        error = ""
-        ok = not targets or succeeded > 0
-        if targets and succeeded == 0:
+        error = "测速已停止" if cancelled else ""
+        ok = (not targets or succeeded > 0) and not cancelled
+        if targets and succeeded == 0 and not cancelled:
             error = "全部测速失败"
 
         latest_cfg = load_ui_config()
@@ -4055,6 +4068,7 @@ INDEX_HTML = r"""<!doctype html>
         <div id="speed_progress" class="speed-progress"></div>
         <div class="speed-actions">
           <button type="button" onclick="startSpeedTest()">立即测速</button>
+          <button type="button" onclick="stopSpeedTest()">停止测速</button>
           <button type="submit" class="btn-primary">保存设置</button>
         </div>
       </form>
@@ -5150,7 +5164,7 @@ function closeNetworkModal() {
 function openSpeedModal() {
   populateRoutingCountries();
   $("speed_error").style.display = "none";
-  $("speed_enabled").checked = state.speed_test_enabled !== false;
+  $("speed_enabled").checked = state.speed_test_enabled === true;
   $("speed_ip_type").value = state.speed_test_ip_type || "all";
   $("speed_status").value = state.speed_test_status || "all";
   $("speed_favorites_only").checked = state.speed_test_favorites_only === true;
@@ -5195,6 +5209,17 @@ async function startSpeedTest() {
   }
   $("speed_progress").textContent = `测速任务已启动，共 ${data.total} 个节点`;
   load();
+}
+
+async function stopSpeedTest() {
+  const res = await fetch("./api/stop_speed_test", {method:"POST"});
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    $("speed_error").textContent = data.error || "停止失败";
+    $("speed_error").style.display = "block";
+    return;
+  }
+  $("speed_progress").textContent = "正在停止测速…";
 }
 
 async function saveNetwork(e) {
@@ -6182,6 +6207,13 @@ class Handler(BaseHTTPRequestHandler):
             total = len(filter_speed_nodes(read_nodes(), cfg))
             request_speed_test_run()
             self.send_json({"ok": True, "total": total, "message": "测速任务已启动"})
+            return
+
+        elif effective_path == "/api/stop_speed_test":
+            if not stop_speed_test():
+                self.send_json({"ok": False, "error": "当前没有测速任务"}, HTTPStatus.CONFLICT)
+                return
+            self.send_json({"ok": True, "message": "测速将在当前节点完成后停止"})
             return
 
         elif effective_path == "/api/update_routing":
