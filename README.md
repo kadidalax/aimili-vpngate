@@ -11,32 +11,18 @@ AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN
 
 ---
 
-### 🌟 VPS 优选推荐：跑 AimiliVPN 更稳更省心
-[![BandwagonHost 顶级三网优化](https://img.shields.io/badge/BandwagonHost-%E9%A1%B6%E7%BA%A7%E4%B8%89%E7%BD%91%E4%BC%98%E5%8C%96-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
-[![RackNerd 6000GB 流量](https://img.shields.io/badge/RackNerd-6000GB%2F%E6%9C%88%20%E5%A4%A7%E6%B5%81%E9%87%8F-blue?style=for-the-badge)](https://my.racknerd.com/aff.php?aff=18708)
-
-| 推荐 | 适合谁 | 亮点 | 入口 |
-| --- | --- | --- | --- |
-| **BandwagonHost 搬瓦工** | 更看重国内访问质量、延迟和线路上限的用户 | **顶级三网优化线路**，适合对网络体验、跨境访问质量和长期稳定性要求更高的场景 | [立即查看](https://bandwagonhost.com/aff.php?aff=81790) |
-| **RackNerd** | 想低成本部署、测试、长期挂机的用户 | **每月 6000GB 流量**，价格实惠、配置给得足，适合入门部署和性价比优先的 VPS 需求 | [立即查看](https://my.racknerd.com/aff.php?aff=18708) |
-
----
-
-### 📢 官方交流与反馈
-[![Telegram](https://img.shields.io/badge/TG交流群-arestemple-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/arestemple)
-[![Forum](https://img.shields.io/badge/交流论坛-339936.xyz-orange?style=flat-square&logo=discourse&logoColor=white)](https://339936.xyz)
-[![YouTube](https://img.shields.io/badge/视频教程-YouTube-red?style=flat-square&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=s-ATfXR8BpI)
-[![Email](https://img.shields.io/badge/Bug反馈-yaohunse7@gmail.com-red?style=flat-square&logo=gmail&logoColor=white)](mailto:yaohunse7@gmail.com)
-
----
-
 ### 🚀 一键极速部署 (支持 Debian/Ubuntu/CentOS/Alpine 等 Linux 系统)
 
 在您的 Linux VPS 上以 root 用户执行以下对应命令：
 
-#### 🌟 正式稳定版本 (main 分支)
+#### AimiliVPN
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
+```
+
+#### sing-box 家宽出口工具（需先安装 AimiliVPN 和 sing-box）
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
 ```
 > 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
@@ -101,8 +87,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 支持常见的 Debian、Ubuntu 等 systemd 系统，以及 Alpine 等 OpenRC 系统。运行前需要 root、TUN/TAP、Python 3、iproute2、nftables、curl，以及支持数据包标记的 OpenVPN。
 
 ```bash
-chmod +x jkw.sh
-./jkw.sh
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
 ```
 
 菜单提供：
@@ -144,47 +129,23 @@ chmod +x jkw.sh
 
 ---
 
-### 🎁 捐赠支持项目开发
-
-如果您觉得这个项目对您有所帮助，欢迎捐赠支持我们的后续开发与维护：
-
-* **BNB (BSC / BEP20)**: `0xB6d78c42CEB0687A31B8cfEBE4b51b6eB8953C17`
-* **TRX (TRC20)**: `TSdzCW6JvsrqcppodYjhSrku4mYmDJ9pxf`
-
-感谢您的慷慨与支持！❤️
-
----
-
 <a name="english"></a>
 ## English
 
 AimiliVPN is a high-performance, zero-dependency VPN proxy gateway built entirely using Python's standard library. It parses official VPNGate servers, benchmarks latency, and routes traffic through a built-in dual-protocol (HTTP/SOCKS5) proxy server.
 
-### 🌟 Recommended VPS Deals
-[![BandwagonHost Premium Optimized Routes](https://img.shields.io/badge/BandwagonHost-Premium%20Optimized%20Routes-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
-[![RackNerd 6000GB Bandwidth](https://img.shields.io/badge/RackNerd-6000GB%2Fmonth%20Bandwidth-blue?style=for-the-badge)](https://my.racknerd.com/aff.php?aff=18708)
-
-| Pick | Best for | Highlights | Link |
-| --- | --- | --- | --- |
-| **BandwagonHost** | Users who care most about China connectivity, latency, and route quality | **Premium China Telecom/Unicom/Mobile optimized routes**, ideal for demanding cross-border networking and long-term use | [View deals](https://bandwagonhost.com/aff.php?aff=81790) |
-| **RackNerd** | Budget deployments, testing, and long-running lightweight services | **6000GB monthly bandwidth**, affordable pricing, and generous specs for value-focused VPS use | [View deals](https://my.racknerd.com/aff.php?aff=18708) |
-
-
-### 📢 Community & Feedback
-- **Telegram Group**: [arestemple](https://t.me/arestemple)
-- **Discussion Forum**: [339936.xyz](https://339936.xyz)
-- **Video Tutorial**: [YouTube Guide](https://www.youtube.com/watch?v=s-ATfXR8BpI)
-- **Email Contact**: yaohunse7@gmail.com
-
----
-
 ### 🚀 One-Click Installation
 
 Run the corresponding command on your Linux VPS as root:
 
-#### 🌟 Stable Release (main branch)
+#### AimiliVPN
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
+```
+
+#### sing-box Residential Egress Tool (install AimiliVPN and sing-box first)
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
 ```
 
 > 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
@@ -242,14 +203,3 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 #### 3. "API Domain Blocked" / Candidate nodes pool is empty (0 nodes)
 * **Reason**: The official VPNGate domain is blocked or DNS resolution failed on your VPS.
 * **Solution**: Add an HTTP/SOCKS5 upstream proxy in the settings panel (Admin -> Proxy Settings), or configure public DNS in `/etc/resolv.conf` (e.g., `nameserver 8.8.8.8`).
-
----
-
-### 🎁 Donation Support
-
-If you find this project helpful, you can support its development and maintenance via donation:
-
-* **BNB (BSC / BEP20)**: `0xB6d78c42CEB0687A31B8cfEBE4b51b6eB8953C17`
-* **TRX (TRC20)**: `TSdzCW6JvsrqcppodYjhSrku4mYmDJ9pxf`
-
-Thank you for your generosity and support! ❤️
