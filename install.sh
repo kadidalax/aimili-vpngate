@@ -579,6 +579,9 @@ def uninstall_service():
     confirm = input("确定要完全卸载 AimiliVPN 吗？(y/N): ")
     if confirm.lower() == 'y':
         print("正在完全卸载 AimiliVPN...", flush=True)
+        if os.path.exists("/usr/local/sbin/jkw"):
+            print("正在撤销 sing-box 家宽出口设置...", flush=True)
+            subprocess.run(["/usr/local/sbin/jkw", "--撤销"], check=False)
         stop_service()
         if shutil.which("systemctl"):
             subprocess.run(["systemctl", "disable", "aimilivpn.service"])

@@ -17,12 +17,12 @@ AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN
 
 #### AimiliVPN
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
+bash <(curl -fL https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 #### sing-box 家宽出口工具（需先安装 AimiliVPN 和 sing-box）
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
+bash <(curl -fL https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
 ```
 > 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
@@ -87,7 +87,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/
 支持常见的 Debian、Ubuntu 等 systemd 系统，以及 Alpine 等 OpenRC 系统。运行前需要 root、TUN/TAP、Python 3、iproute2、nftables、curl，以及支持数据包标记的 OpenVPN。
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
+bash <(curl -fL https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
 ```
 
 菜单提供：
@@ -140,12 +140,12 @@ Run the corresponding command on your Linux VPS as root:
 
 #### AimiliVPN
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
+bash <(curl -fL https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 #### sing-box Residential Egress Tool (install AimiliVPN and sing-box first)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
+bash <(curl -fL https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/jkw.sh)
 ```
 
 > 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
