@@ -2553,6 +2553,23 @@ def maintain_valid_nodes(force: bool = False) -> str:
         maintenance_lock.release()
 
 
+def check_current_nodes() -> str:
+    if not maintenance_lock.acquire(blocking=False):
+        return "节点维护任务正在运行，请稍后再试"
+    global node_refresh_running, is_connecting
+    try:
+        node_refresh_running = True
+        with lock:
+            node_ids = [str(node["id"]) for node in read_nodes() if node.get("id") and not node.get("active")]
+        set_state(last_check_message=f"正在检测 {len(node_ids)} 个现有节点的可用性...")
+        test_multiple_nodes(node_ids)
+        set_state(last_check_at=time.time(), last_check_message=f"现有节点可用性检测完成，共检测 {len(node_ids)} 个节点")
+        return f"现有节点可用性检测完成，共检测 {len(node_ids)} 个节点"
+    finally:
+        node_refresh_running = False
+        is_connecting = False
+        maintenance_lock.release()
+
 def collector_loop() -> None:
     global last_collector_heartbeat
     while True:
@@ -3790,6 +3807,7 @@ INDEX_HTML = r"""<!doctype html>
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
       更新节点
     </button>
+    <button id="check_availability" class="btn-primary" type="button">检测可用性</button>
     <button id="speed_settings_top" class="btn-primary" type="button" onclick="openSpeedModal()" style="background: rgba(99, 102, 241, 0.12); border: 1px solid rgba(99, 102, 241, 0.45); color: #c7d2fe;">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
       测速设置
@@ -4067,7 +4085,7 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div id="speed_progress" class="speed-progress"></div>
         <div class="speed-actions">
-          <button type="button" onclick="startSpeedTest()">立即测速</button>
+          <button type="button" onclick="startSpeedTest()">按当前筛选测速</button>
           <button type="button" onclick="stopSpeedTest()">停止测速</button>
           <button type="submit" class="btn-primary">保存设置</button>
         </div>
@@ -4789,6 +4807,19 @@ $("refresh").onclick=async()=>{
   }
   catch(e){
     refreshButtonIdle();
+  }
+};
+$("check_availability").onclick=async()=>{
+  const btn = $("check_availability");
+  btn.disabled = true;
+  btn.textContent = "正在检测...";
+  try {
+    await fetch("./api/check_availability", {method:"POST"});
+    await load();
+    startRefreshPolling();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "检测可用性";
   }
 };
 $("btn_test_proxy").onclick = async () => {
@@ -6306,6 +6337,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "message": "已在后台启动节点更新流程", "running": False})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/check_availability":
+            if maintenance_lock.locked():
+                self.send_json({"ok": True, "message": "节点维护任务正在运行", "running": True})
+            else:
+                threading.Thread(target=check_current_nodes, daemon=True).start()
+                self.send_json({"ok": True, "message": "已在后台启动可用性检测", "running": False})
         elif effective_path == "/api/test_nodes":
             try:
                 payload = self.read_json_body(max_bytes=262144)

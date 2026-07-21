@@ -500,9 +500,20 @@ class SpeedConfigTests(unittest.TestCase):
 
     def test_speed_ui_strings_present(self):
         self.assertIn("测速设置", self.app.INDEX_HTML)
-        self.assertIn("立即测速", self.app.INDEX_HTML)
+        self.assertIn("按当前筛选测速", self.app.INDEX_HTML)
+        self.assertIn("检测可用性", self.app.INDEX_HTML)
         self.assertIn("下载速度", self.app.INDEX_HTML)
         self.assertIn("测速时间", self.app.INDEX_HTML)
+
+    def test_manual_availability_check_uses_current_non_active_nodes(self):
+        self.app.NODES_FILE.write_text(json.dumps([
+            {"id": "active", "active": True},
+            {"id": "candidate", "active": False},
+        ]), encoding="utf-8")
+        with patch.object(self.app, "test_multiple_nodes") as check:
+            result = self.app.check_current_nodes()
+        self.assertIn("1 个", result)
+        check.assert_called_once_with(["candidate"])
 
     def test_residential_ui_explains_mobile_is_included(self):
         self.assertIn("住宅 IP（含移动网络）", self.app.INDEX_HTML)
