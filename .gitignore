@@ -43,6 +43,7 @@ logs/
 # ---- AI 编码助手 ----
 .gemini/
 .cursor/
+.superpowers/
 .cursorrules
 .aider*
 .codeium/
@@ -56,8 +57,10 @@ AimiliVPN_Analysis_ZH.md
 
 # ---- 临时和测试文件 ----
 scratch/
+tmp/
 *连接配置*
 test_*.py
+!tests/test_*.py
 *.bak
 *.orig
 

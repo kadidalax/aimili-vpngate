@@ -94,6 +94,27 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 
 ---
 
+### 🏠 sing-box 家宽出口菜单工具
+
+仓库中的 `jkw.sh` 用于已经安装 AimiliVPN 和 fscarmen sing-box 的 VPS。工具不会自动安装缺失组件，也不会修改节点、证书、订阅或 SSH 配置。
+
+支持常见的 Debian、Ubuntu 等 systemd 系统，以及 Alpine 等 OpenRC 系统。运行前需要 root、TUN/TAP、Python 3、iproute2、nftables、curl，以及支持数据包标记的 OpenVPN。
+
+```bash
+chmod +x jkw.sh
+./jkw.sh
+```
+
+菜单提供：
+
+- 所有 sing-box 节点走家宽，系统其他流量保持 VPS 原出口。
+- 整机全走家宽开关，并阻止 IPv6 和断线回退造成的原生 IP 泄漏。
+- 出口测试、环境检查、撤销全部改动和彻底卸载。
+
+默认推荐“所有 sing-box 节点走家宽”。卸载只清理本工具创建的命令、服务、路由和防火墙规则，不卸载 AimiliVPN 或 sing-box。
+
+---
+
 ### ⚠️ 小白安装与运行常见问题 (FAQ)
 
 #### 1. 提示 `Cannot allocate tun` 或 `Cannot open tun/tap dev`

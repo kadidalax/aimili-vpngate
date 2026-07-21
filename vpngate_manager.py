@@ -23,6 +23,7 @@ from typing import Any
 import concurrent.futures
 import sys
 import uuid
+import http.client
 
 # Prefer IPv4 resolution to avoid slow AAAA DNS timeouts (e.g. in WSL),
 # but fall back to system default (IPv6) if IPv4 resolution fails.
@@ -113,6 +114,16 @@ OPENVPN_TEST_TIMEOUT_SECONDS = env_int("OPENVPN_TEST_TIMEOUT_SECONDS", 35, 1)
 MANUAL_TEST_NODE_LIMIT = env_int("MANUAL_TEST_NODE_LIMIT", 5, 1, 20)
 INITIAL_CONNECT_TEST_LIMIT = env_int("INITIAL_CONNECT_TEST_LIMIT", 10, 1, 50)
 OPENVPN_CMD = os.environ.get("OPENVPN_CMD", "openvpn")
+OPENVPN_DIRECT_MARK = 51820
+MAIN_ROUTE_TABLE = 100
+MAIN_RULE_PRIORITY = 32765
+JKW_COMMAND = Path("/usr/local/sbin/jkw")
+
+def global_residential_mode_enabled() -> bool:
+    try:
+        return Path("/etc/jkw/当前模式").read_text(encoding="utf-8").strip() == "global"
+    except OSError:
+        return False
 OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
 OPENVPN_AUTH_PASS = os.environ.get("OPENVPN_AUTH_PASS", "vpn")
 LOCAL_PROXY_HOST = os.environ.get("LOCAL_PROXY_HOST", "127.0.0.1")
@@ -120,6 +131,16 @@ LOCAL_PROXY_PORT = env_int("LOCAL_PROXY_PORT", 7928, 1, 65535)
 UI_HOST = os.environ.get("UI_HOST", "::")
 UI_PORT = env_int("UI_PORT", 8787, 1, 65535)
 INVALID_BACKOFF_SECONDS = env_int("INVALID_BACKOFF_SECONDS", 30 * 60, 1)
+DEFAULT_SPEED_TEST_URL = "https://speed.cloudflare.com/__down?bytes=10485760"
+LEGACY_SPEED_TEST_URL = "https://speed.hetzner.de/100MB.bin"
+NODE_RUNTIME_FIELDS = (
+    "probe_status", "probe_message", "latency_ms", "probed_at",
+    "owner", "asn", "as_name", "location", "ip_type", "quality",
+)
+SPEED_TEST_RESULT_FIELDS = (
+    "speed_test_bps", "speed_test_at", "speed_test_bytes",
+    "speed_test_status", "speed_test_error",
+)
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
@@ -132,10 +153,16 @@ BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 
 lock = threading.RLock()
 maintenance_lock = threading.Lock()
+speed_test_lock = threading.Lock()
+speed_test_trigger = threading.Event()
+speed_test_request_lock = threading.Lock()
+speed_test_run_requested = False
 active_sessions: dict[str, float] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
+connection_operation_version = 0
 is_connecting = False
+node_refresh_running = False
 last_active_ping_time = 0.0
 last_active_latency = 0
 
@@ -227,7 +254,15 @@ def load_ui_config() -> dict[str, Any]:
             "connection_enabled": True,
             "fixed_node_id": "",
             "favorite_node_ids": [],
-            "fav_fail_fallback": False
+            "fav_fail_fallback": False,
+            "speed_test_enabled": True,
+            "speed_test_interval": 3600,
+            "speed_test_min_bytes": 10 * 1024 * 1024,
+            "speed_test_url": DEFAULT_SPEED_TEST_URL,
+            "speed_test_country": "",
+            "speed_test_ip_type": "all",
+            "speed_test_status": "all",
+            "speed_test_favorites_only": False,
         }
         updated = False
         if auth_file.exists():
@@ -235,7 +270,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "speed_test_enabled", "speed_test_interval", "speed_test_min_bytes", "speed_test_url", "speed_test_country", "speed_test_ip_type", "speed_test_status", "speed_test_favorites_only"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -263,6 +298,62 @@ def load_ui_config() -> dict[str, Any]:
         if normalized_proxy_port != config.get("proxy_port"):
             config["proxy_port"] = normalized_proxy_port
             updated = True
+
+        normalized_speed_enabled = config.get("speed_test_enabled")
+        if not isinstance(normalized_speed_enabled, bool):
+            normalized_speed_enabled = True
+        if normalized_speed_enabled != config.get("speed_test_enabled"):
+            config["speed_test_enabled"] = normalized_speed_enabled
+            updated = True
+
+        normalized_speed_interval = bounded_int(config.get("speed_test_interval"), 3600, 3600)
+        if normalized_speed_interval != config.get("speed_test_interval"):
+            config["speed_test_interval"] = normalized_speed_interval
+            updated = True
+
+        normalized_speed_min_bytes = bounded_int(config.get("speed_test_min_bytes"), 10 * 1024 * 1024, 10 * 1024 * 1024)
+        if normalized_speed_min_bytes != config.get("speed_test_min_bytes"):
+            config["speed_test_min_bytes"] = normalized_speed_min_bytes
+            updated = True
+
+        normalized_speed_country = config.get("speed_test_country")
+        if not isinstance(normalized_speed_country, str):
+            normalized_speed_country = ""
+        else:
+            normalized_speed_country = normalized_speed_country.strip()
+        if normalized_speed_country != config.get("speed_test_country"):
+            config["speed_test_country"] = normalized_speed_country
+            updated = True
+
+        normalized_speed_url = config.get("speed_test_url")
+        if isinstance(normalized_speed_url, str):
+            normalized_speed_url = normalized_speed_url.strip()
+        if normalized_speed_url == LEGACY_SPEED_TEST_URL:
+            normalized_speed_url = DEFAULT_SPEED_TEST_URL
+        parsed_speed_url = urllib.parse.urlparse(normalized_speed_url) if isinstance(normalized_speed_url, str) else None
+        if (
+            not parsed_speed_url
+            or parsed_speed_url.scheme.lower() != "https"
+            or not parsed_speed_url.netloc
+            or not parsed_speed_url.hostname
+        ):
+            normalized_speed_url = DEFAULT_SPEED_TEST_URL
+        if normalized_speed_url != config.get("speed_test_url"):
+            config["speed_test_url"] = normalized_speed_url
+            updated = True
+
+        if config.get("speed_test_ip_type") not in {"all", "residential", "hosting"}:
+            config["speed_test_ip_type"] = "all"
+            updated = True
+        if config.get("speed_test_status") not in {"all", "available", "testing", "unavailable"}:
+            config["speed_test_status"] = "all"
+            updated = True
+        normalized_speed_favorites = config.get("speed_test_favorites_only")
+        if not isinstance(normalized_speed_favorites, bool):
+            normalized_speed_favorites = False
+        if normalized_speed_favorites != config.get("speed_test_favorites_only"):
+            config["speed_test_favorites_only"] = normalized_speed_favorites
+            updated = True
             
         if not auth_file.exists() or updated:
             try:
@@ -272,6 +363,37 @@ def load_ui_config() -> dict[str, Any]:
                 pass
                 
         return config
+
+def validate_speed_settings(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "测速设置格式无效"}
+    if not isinstance(payload.get("enabled"), bool) or not isinstance(payload.get("favorites_only"), bool):
+        return {"ok": False, "error": "测速开关格式无效"}
+    if not isinstance(payload.get("country"), str):
+        return {"ok": False, "error": "国家必须是文本"}
+    if payload.get("ip_type") not in {"all", "residential", "hosting"}:
+        return {"ok": False, "error": "IP 类型无效"}
+    if payload.get("status") not in {"all", "available", "testing", "unavailable"}:
+        return {"ok": False, "error": "节点状态无效"}
+    interval = payload.get("interval")
+    if isinstance(interval, bool) or not isinstance(interval, int) or interval < 3600:
+        return {"ok": False, "error": "测速周期不能少于 3600 秒"}
+    url = payload.get("url", DEFAULT_SPEED_TEST_URL)
+    parsed = urllib.parse.urlparse(url.strip()) if isinstance(url, str) else None
+    if not parsed or parsed.scheme.lower() != "https" or not parsed.hostname:
+        return {"ok": False, "error": "测速地址必须是有效的 HTTPS 地址"}
+    return {
+        "ok": True,
+        "settings": {
+            "speed_test_enabled": payload["enabled"],
+            "speed_test_country": payload["country"].strip(),
+            "speed_test_ip_type": payload["ip_type"],
+            "speed_test_status": payload["status"],
+            "speed_test_favorites_only": payload["favorites_only"],
+            "speed_test_interval": interval,
+            "speed_test_url": url.strip(),
+        },
+    }
 
 # 初始化时优先从 ui_auth.json 加载保存的代理出站端口和网页端口配置以覆盖环境变量
 try:
@@ -349,13 +471,22 @@ def read_nodes() -> list[dict[str, Any]]:
         return []
     return [item for item in raw if isinstance(item, dict)]
 
+def preserve_node_runtime_fields(candidate: dict[str, Any], previous: dict[str, Any]) -> None:
+    for key in NODE_RUNTIME_FIELDS:
+        if previous.get(key) not in (None, ""):
+            candidate[key] = previous[key]
+    for key in SPEED_TEST_RESULT_FIELDS:
+        if key in previous:
+            candidate[key] = previous[key]
+
 def get_state() -> dict[str, Any]:
-    global active_openvpn_node_id, is_connecting
+    global active_openvpn_node_id, is_connecting, node_refresh_running
     state = read_json(STATE_FILE, {})
     state.pop("password", None)
     state["active_openvpn_node_id"] = active_openvpn_node_id
     state["is_connecting"] = is_connecting
     state["maintenance_running"] = maintenance_lock.locked()
+    state["node_refresh_running"] = node_refresh_running
     state.setdefault("api_url", API_URL)
     state.setdefault("target_valid_nodes", TARGET_VALID_NODES)
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
@@ -365,6 +496,12 @@ def get_state() -> dict[str, Any]:
     state.setdefault("last_fetch_status", "not_started")
     state.setdefault("last_check_message", "")
     state.setdefault("blacklisted_nodes", 0)
+    state.setdefault("speed_test_running", False)
+    state.setdefault("speed_test_current_node_id", "")
+    state.setdefault("speed_test_completed", 0)
+    state.setdefault("speed_test_total", 0)
+    state.setdefault("speed_test_last_at", 0)
+    state.setdefault("speed_test_last_error", "")
     
     # Pre-populate settings inputs in UI
     ui_cfg = load_ui_config()
@@ -380,6 +517,16 @@ def get_state() -> dict[str, Any]:
     state["fixed_node_id"] = ui_cfg.get("fixed_node_id", "")
     state["favorite_node_ids"] = ui_cfg.get("favorite_node_ids", [])
     state["fav_fail_fallback"] = False
+    for key in (
+        "speed_test_enabled",
+        "speed_test_interval",
+        "speed_test_url",
+        "speed_test_country",
+        "speed_test_ip_type",
+        "speed_test_status",
+        "speed_test_favorites_only",
+    ):
+        state[key] = ui_cfg[key]
     
     return state
 
@@ -627,9 +774,69 @@ def fetch_api_text_via_proxy(url: str, ptype: str, phost: str, pport: int, use_s
 
     return body_part.decode('utf-8', errors='replace')
 
+def resolve_direct_host(host: str, interface: str | None = None) -> str:
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    interface = interface or main_route_interface()
+    resolved = proxy_server.dns_query_over_interface(
+        host, 1, "1.1.1.1", 4.0, interface, OPENVPN_DIRECT_MARK
+    )
+    if not resolved:
+        raise RuntimeError(f"无法通过 VPS 公网解析 {host}")
+    return resolved
+
+def fetch_api_text_direct(url: str, use_ssl_verify: bool = True) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("API 地址必须是有效的 HTTP(S) 地址")
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    interface = main_route_interface()
+    resolved_ip = resolve_direct_host(host, interface)
+    sock: socket.socket | None = None
+    wrapped = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(12)
+        prepare_direct_socket(sock, interface)
+        sock.connect((resolved_ip, port))
+        wrapped = sock
+        if parsed.scheme == "https":
+            import ssl
+            context = ssl.create_default_context() if use_ssl_verify else ssl._create_unverified_context()
+            wrapped = context.wrap_socket(sock, server_hostname=host)
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        wrapped.sendall(
+            f"GET {target} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: vpngate-openvpn-manager/2.0\r\nAccept: text/plain,*/*\r\nConnection: close\r\n\r\n".encode()
+        )
+        response = http.client.HTTPResponse(wrapped)
+        response.begin()
+        if response.status != 200:
+            raise RuntimeError(f"API 返回 HTTP {response.status}")
+        body = response.read(10 * 1024 * 1024 + 1)
+        if len(body) > 10 * 1024 * 1024:
+            raise RuntimeError("API 响应超过 10 MiB")
+        return body.decode("utf-8", errors="replace")
+    finally:
+        if wrapped is not None:
+            try:
+                wrapped.close()
+            except OSError:
+                pass
+        elif sock is not None:
+            sock.close()
+
 def fetch_api_text(url: str | None = None, use_ssl_verify: bool = True) -> str:
     if url is None:
         url = API_URL
+
+    if global_residential_mode_enabled():
+        return fetch_api_text_direct(url, use_ssl_verify)
     
     ptype, phost, pport = vpn_utils.get_upstream_proxy()
     if ptype and phost and pport:
@@ -847,7 +1054,12 @@ def get_openvpn_version() -> float:
     _openvpn_version = 2.4
     return _openvpn_version
 
-def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> list[str]:
+def openvpn_command(
+    config_file: str,
+    route_nopull: bool,
+    dev: str = "tun0",
+    use_upstream_proxy: bool = True,
+) -> list[str]:
     command = split_openvpn_command()
     command.extend(
         [
@@ -882,13 +1094,16 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> 
         command.extend(["--ncp-ciphers", "AES-128-CBC:AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"])
 
     command.extend(["--verb", "3"])
+
+    if sys.platform.startswith("linux"):
+        command.extend(["--mark", str(OPENVPN_DIRECT_MARK)])
     
     if os.path.exists("/etc/ssl/certs"):
         command.extend(["--capath", "/etc/ssl/certs"])
     
     try:
         content = Path(config_file).read_text(encoding="utf-8", errors="replace")
-        if vpn_utils.is_config_tcp(content):
+        if use_upstream_proxy and vpn_utils.is_config_tcp(content):
             ptype, host, port = vpn_utils.get_upstream_proxy()
             auth_file = upstream_proxy_auth_file()
             if ptype == "socks" and host and port:
@@ -990,11 +1205,19 @@ def update_handshake_status(line_lower: str) -> None:
             set_state(active_node_latency=short_status, last_check_message=detailed_desc)
             break
 
-def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bool, timeout: int | None = None, dev: str = "tun0") -> tuple[bool, str, subprocess.Popen[str] | None]:
+def run_openvpn_until_ready(
+    config_file: str,
+    keep_alive: bool,
+    route_nopull: bool,
+    timeout: int | None = None,
+    dev: str = "tun0",
+    report_status: bool = True,
+    use_upstream_proxy: bool = True,
+) -> tuple[bool, str, subprocess.Popen[str] | None]:
     limit = timeout if timeout is not None else OPENVPN_TEST_TIMEOUT_SECONDS
     try:
         process = subprocess.Popen(
-            openvpn_command(config_file, route_nopull, dev),
+            openvpn_command(config_file, route_nopull, dev, use_upstream_proxy),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1019,7 +1242,7 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
                 openvpn_logs.append(line_str)
                 lines.put(line_str)
             else:
-                if keep_alive:
+                if keep_alive and report_status:
                     print(f"[OpenVPN] {line_str}", flush=True)
                     level = "INFO"
                     line_lower = line_str.lower()
@@ -1048,10 +1271,10 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
         if line:
             tail.append(line)
             tail = tail[-50:]
-            if keep_alive:
+            if keep_alive and report_status:
                 print(f"[OpenVPN] {line}", flush=True)
         lower = line.lower()
-        if keep_alive:
+        if keep_alive and report_status:
             update_handshake_status(lower)
         if "initialization sequence completed" in lower:
             ok = True
@@ -1067,14 +1290,15 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
         message = f"OpenVPN timeout after {limit}s."
 
     # Bulk write accumulated startup logs
-    for line_str in openvpn_logs:
-        level = "INFO"
-        line_lower = line_str.lower()
-        if "error" in line_lower or "failed" in line_lower or "cannot" in line_lower or "fatal" in line_lower or "permission denied" in line_lower:
-            level = "ERROR"
-        elif "warning" in line_lower or "warn" in line_lower or "deprecated" in line_lower:
-            level = "WARNING"
-        log_to_json(level, "VPN", f"[OpenVPN] {line_str}")
+    if report_status:
+        for line_str in openvpn_logs:
+            level = "INFO"
+            line_lower = line_str.lower()
+            if "error" in line_lower or "failed" in line_lower or "cannot" in line_lower or "fatal" in line_lower or "permission denied" in line_lower:
+                level = "ERROR"
+            elif "warning" in line_lower or "warn" in line_lower or "deprecated" in line_lower:
+                level = "WARNING"
+            log_to_json(level, "VPN", f"[OpenVPN] {line_str}")
 
     if not ok:
         err_code, diag_msg = vpn_utils.diagnose_openvpn_failure(tail)
@@ -1086,21 +1310,32 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
     return ok, message, process
 
 
-def setup_policy_routing(interface: str = "tun0") -> None:
-    try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
-    except Exception:
-        pass
-    try:
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-    except Exception:
-        pass
-    
-    success = False
+def cleanup_policy_routing(interface: str, table: int, priority: int) -> None:
+    commands = (
+        ["ip", "rule", "del", "priority", str(priority), "oif", interface, "lookup", str(table)],
+        ["ip", "route", "flush", "table", str(table)],
+    )
+    for command in commands:
+        try:
+            subprocess.run(command, capture_output=True, timeout=2)
+        except Exception:
+            pass
+
+def setup_policy_routing(interface: str, table: int, priority: int) -> None:
+    cleanup_policy_routing(interface, table, priority)
+    last_error: Exception | None = None
     for attempt in range(1, 4):
         try:
-            subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
-            subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
+            subprocess.run(
+                ["ip", "route", "replace", "default", "dev", interface, "table", str(table)],
+                check=True,
+                timeout=2,
+            )
+            subprocess.run(
+                ["ip", "rule", "add", "priority", str(priority), "oif", interface, "lookup", str(table)],
+                check=True,
+                timeout=2,
+            )
             # 配置反向路径过滤 rp_filter 为 loose 模式 (2)，防止回包被内核静默丢弃
             for proc_path in ["all", "default", interface]:
                 try:
@@ -1108,28 +1343,31 @@ def setup_policy_routing(interface: str = "tun0") -> None:
                 except Exception:
                     pass
             print(f"[policy_routing] Enabled policy routing for interface {interface} (attempt {attempt} success)", flush=True)
-            success = True
-            break
+            return
         except Exception as e:
+            last_error = e
             print(f"[policy_routing] Attempt {attempt} failed to enable policy routing: {e}", flush=True)
-            time.sleep(1)
-            
-    if not success:
-        print("[路由配置失败] [错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由，这可能会导致通过 VPN 接口的出站路由无法正常解析。请检查系统是否支持策略路由、iproute2 工具是否完整，以及是否具有 root 权限。", flush=True)
-        log_to_json("ERROR", "Routing", "[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由")
+            cleanup_policy_routing(interface, table, priority)
+            if attempt < 3:
+                time.sleep(1)
+    raise RuntimeError(f"[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败: {last_error}")
 
-def cleanup_policy_routing() -> None:
+def refresh_global_residential_route() -> None:
+    if not JKW_COMMAND.exists():
+        return
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-        print("[policy_routing] Cleared policy routing table 100", flush=True)
-    except Exception:
-        pass
+        subprocess.run(
+            [str(JKW_COMMAND), "--刷新整机路由"],
+            capture_output=True,
+            timeout=8,
+        )
+    except Exception as exc:
+        log_to_json("WARNING", "Routing", f"刷新整机家宽路由失败: {exc}")
 
 def stop_active_openvpn() -> None:
     global active_openvpn_process, active_openvpn_node_id
     with lock:
-        cleanup_policy_routing()
+        cleanup_policy_routing("tun0", MAIN_ROUTE_TABLE, MAIN_RULE_PRIORITY)
         config_to_delete = None
         if active_openvpn_node_id:
             nodes = read_nodes()
@@ -1140,7 +1378,6 @@ def stop_active_openvpn() -> None:
         stop_process(active_openvpn_process)
         active_openvpn_process = None
         active_openvpn_node_id = ""
-        kill_existing_openvpn_processes()
         
         if config_to_delete:
             try:
@@ -1153,11 +1390,14 @@ def stop_active_openvpn() -> None:
 def active_openvpn_running() -> bool:
     return active_openvpn_process is not None and active_openvpn_process.poll() is None
 
+def is_residential_ip_type(value: Any) -> bool:
+    return str(value or "") != "hosting"
+
 def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     available_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "available" or n.get("active")],
         key=lambda n: (
-            0 if n.get("ip_type") in ("residential", "mobile") else 1,
+            0 if is_residential_ip_type(n.get("ip_type")) else 1,
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("score"))
         )
@@ -1194,17 +1434,206 @@ def apply_routing_filters(
     if routing_ip_type == "residential":
         candidates = [
             n for n in candidates
-            if n.get("ip_type") in ("residential", "mobile")
-            or (include_unknown_ip_type and not n.get("ip_type"))
+            if is_residential_ip_type(n.get("ip_type"))
         ]
     elif routing_ip_type == "hosting":
         candidates = [
             n for n in candidates
             if n.get("ip_type") == "hosting"
-            or (include_unknown_ip_type and not n.get("ip_type"))
         ]
 
     return candidates
+
+
+def filter_speed_nodes(nodes: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apply the independent background-speed-test filters."""
+    country = str(cfg.get("speed_test_country") or "").strip()
+    ip_type = cfg.get("speed_test_ip_type", "all")
+    status = cfg.get("speed_test_status", "all")
+    favorites_only = cfg.get("speed_test_favorites_only") is True
+    favorite_ids = {str(node_id) for node_id in (cfg.get("favorite_node_ids") or [])}
+
+    result: list[dict[str, Any]] = []
+    for node in nodes:
+        if country and not country_matches(node.get("country"), country):
+            continue
+        if ip_type == "residential" and not is_residential_ip_type(node.get("ip_type")):
+            continue
+        if ip_type == "hosting" and node.get("ip_type") != "hosting":
+            continue
+        if status != "all" and node.get("probe_status") != status:
+            continue
+        if favorites_only and str(node.get("id") or "") not in favorite_ids:
+            continue
+        result.append(node)
+    return result
+
+def clear_speed_test_results(nodes: list[dict[str, Any]]) -> None:
+    for node in nodes:
+        for field in SPEED_TEST_RESULT_FIELDS:
+            node.pop(field, None)
+
+def fastest_speed_result(
+    results: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any] | None:
+    successful = [
+        (node, result)
+        for node, result in results
+        if result.get("speed_test_status") == "ok"
+        and float(result.get("speed_test_bps") or 0) > 0
+    ]
+    if not successful:
+        return None
+    successful.sort(
+        key=lambda pair: (
+            -float(pair[1].get("speed_test_bps") or 0),
+            parse_int(pair[0].get("latency_ms")) or 999999,
+            -parse_int(pair[0].get("score")),
+        )
+    )
+    return successful[0][0]
+
+def note_user_connection_operation() -> int:
+    global connection_operation_version
+    with lock:
+        connection_operation_version += 1
+        return connection_operation_version
+
+def current_connection_operation_version() -> int:
+    with lock:
+        return connection_operation_version
+
+def request_speed_test_run() -> None:
+    global speed_test_run_requested
+    with speed_test_request_lock:
+        speed_test_run_requested = True
+    speed_test_trigger.set()
+
+def consume_speed_test_request() -> bool:
+    global speed_test_run_requested
+    with speed_test_request_lock:
+        requested = speed_test_run_requested
+        speed_test_run_requested = False
+        return requested
+
+
+def format_speed(bytes_per_second: Any) -> str:
+    try:
+        value = float(bytes_per_second)
+    except (TypeError, ValueError):
+        return "-"
+    if value <= 0:
+        return "-"
+    return f"{value / (1024 * 1024):.2f} MB/s"
+
+
+def download_speed_via_interface(
+    interface: str,
+    url: str,
+    minimum_bytes: int,
+    resolved_ip: str,
+) -> dict[str, Any]:
+    """Download a bounded HTTPS range through one interface using curl."""
+    if not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface):
+        return {"ok": False, "bytes": 0, "bps": 0, "error": "测速网卡名称无效"}
+
+    parsed = urllib.parse.urlparse(url if isinstance(url, str) else "")
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return {"ok": False, "bytes": 0, "bps": 0, "error": "测速地址必须使用 HTTPS"}
+    try:
+        socket.inet_aton(resolved_ip)
+    except OSError:
+        return {"ok": False, "bytes": 0, "bps": 0, "error": "测速目标 IPv4 无效"}
+
+    try:
+        target_bytes = int(minimum_bytes)
+    except (TypeError, ValueError):
+        target_bytes = 0
+    minimum = 10 * 1024 * 1024
+    if target_bytes < minimum:
+        return {"ok": False, "bytes": 0, "bps": 0, "error": "测速数据量不能少于 10 MiB"}
+    target_bytes = min(target_bytes, minimum)
+
+    # Range and max-filesize keep a misbehaving server from sending unbounded data.
+    command = [
+        "curl", "--silent", "--show-error", "--fail",
+        "--proto", "=https",
+        "--interface", f"if!{interface}",
+        "--resolve", f"{parsed.hostname}:{parsed.port or 443}:{resolved_ip}",
+        "--connect-timeout", "8",
+        "--max-time", "30",
+        "--limit-rate", "0",
+        "--range", f"0-{target_bytes - 1}",
+        "--max-filesize", str(target_bytes),
+        "--output", os.devnull,
+        "--write-out", "%{size_download} %{time_total}",
+        url,
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=32)
+    except FileNotFoundError:
+        return {"ok": False, "bytes": 0, "bps": 0, "error": "未找到 curl 命令"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "bytes": 0, "bps": 0, "error": "测速超时（超过 30 秒）"}
+    except Exception as exc:
+        return {"ok": False, "bytes": 0, "bps": 0, "error": f"测速执行失败: {exc}"}
+
+    fields = (completed.stdout or "").strip().split()
+    try:
+        downloaded = int(float(fields[0]))
+        elapsed = float(fields[1])
+    except (IndexError, TypeError, ValueError):
+        downloaded = 0
+        elapsed = 0.0
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()
+        return {"ok": False, "bytes": downloaded, "bps": 0, "error": f"下载失败{(': ' + detail) if detail else ''}"}
+    if downloaded < target_bytes:
+        return {"ok": False, "bytes": downloaded, "bps": 0, "error": f"实际下载 {downloaded} 字节，未达到 {target_bytes} 字节"}
+    if downloaded > target_bytes or elapsed <= 0:
+        return {"ok": False, "bytes": downloaded, "bps": 0, "error": "测速返回数据或耗时无效"}
+    return {"ok": True, "bytes": downloaded, "bps": downloaded / elapsed, "elapsed": elapsed, "error": ""}
+
+def main_route_interface() -> str:
+    result = subprocess.run(
+        ["ip", "-4", "route", "show", "table", "main", "default"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=2,
+    )
+    match = re.search(r"\bdev\s+(\S+)", result.stdout)
+    if not match:
+        raise RuntimeError("无法确定 VPS 公网接口")
+    return match.group(1)
+
+def prepare_direct_socket(sock: socket.socket, interface: str) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    if hasattr(socket, "SO_MARK"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, OPENVPN_DIRECT_MARK)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b"\0")
+
+def resolve_speed_target(url: str) -> str:
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not host:
+        raise RuntimeError("测速地址缺少域名")
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    resolved = proxy_server.dns_query_over_interface(
+        host,
+        1,
+        "1.1.1.1",
+        4.0,
+        main_route_interface(),
+        OPENVPN_DIRECT_MARK,
+    )
+    if not resolved:
+        raise RuntimeError("测速域名无法通过 VPS 公网解析")
+    return resolved
 
 def normalized_country_name(country: Any) -> str:
     value = str(country or "").strip()
@@ -1246,7 +1675,7 @@ def validate_node_allowed_by_routing(node: dict[str, Any], ui_cfg: dict[str, Any
 
     routing_ip_type = ui_cfg.get("routing_ip_type", "all")
     node_ip_type = node.get("ip_type")
-    if routing_ip_type == "residential" and node_ip_type not in ("residential", "mobile"):
+    if routing_ip_type == "residential" and not is_residential_ip_type(node_ip_type):
         raise RuntimeError("当前已锁定住宅 IP 出站，不能连接非住宅节点")
     if routing_ip_type == "hosting" and node_ip_type != "hosting":
         raise RuntimeError("当前已锁定机房 IP 出站，不能连接非机房节点")
@@ -1330,6 +1759,187 @@ def release_test_index(idx: int) -> None:
 def test_config_path(node_id: str) -> Path:
     safe_id = safe_name(node_id)
     return CONFIG_DIR / f".test_{safe_id}_{uuid.uuid4().hex}.ovpn"
+
+def speed_test_node(node: dict[str, Any], url: str) -> dict[str, Any]:
+    tested_at = int(time.time())
+    result = {
+        "speed_test_bps": 0,
+        "speed_test_at": tested_at,
+        "speed_test_bytes": 0,
+        "speed_test_status": "error",
+        "speed_test_error": "",
+    }
+    temp_path = test_config_path(str(node.get("id") or "node"))
+    idx = None
+    process = None
+    interface = ""
+    table = 0
+    priority = 0
+    try:
+        config_text = node.get("config_text") or ""
+        if not config_text:
+            raise RuntimeError("节点缺少 OpenVPN 配置")
+        CONFIG_DIR.mkdir(exist_ok=True, parents=True)
+        temp_path.write_text(config_text, encoding="utf-8")
+        idx = get_free_test_index()
+        interface = f"tun{idx}"
+        table = 200 + idx
+        priority = 31000 + idx
+        resolved_ip = resolve_speed_target(url)
+        ok, message, process = run_openvpn_until_ready(
+            str(temp_path), keep_alive=True, route_nopull=True, timeout=30, dev=interface,
+            report_status=False, use_upstream_proxy=False,
+        )
+        if not ok:
+            raise RuntimeError(message)
+        setup_policy_routing(interface, table, priority)
+        download = download_speed_via_interface(
+            interface,
+            url,
+            load_ui_config().get("speed_test_min_bytes", 10 * 1024 * 1024),
+            resolved_ip,
+        )
+        if not download.get("ok"):
+            raise RuntimeError(str(download.get("error") or "下载测速失败"))
+        result.update(
+            speed_test_bps=download["bps"],
+            speed_test_bytes=download["bytes"],
+            speed_test_status="ok",
+        )
+    except Exception as exc:
+        result["speed_test_error"] = f"测速失败：{exc}"
+    finally:
+        stop_process(process)
+        if idx is not None:
+            cleanup_policy_routing(interface, table, priority)
+        if idx is not None:
+            release_test_index(idx)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return result
+
+def speed_test_once() -> dict[str, Any]:
+    if not speed_test_lock.acquire(blocking=False):
+        return {"ok": False, "error": "测速任务正在运行"}
+    maintenance_acquired = False
+    try:
+        maintenance_acquired = maintenance_lock.acquire(blocking=False)
+        if not maintenance_acquired:
+            return {"ok": False, "error": "节点维护任务正在运行，请稍后再试"}
+
+        cfg = load_ui_config()
+        starting_version = current_connection_operation_version()
+        with lock:
+            nodes = read_nodes()
+            clear_speed_test_results(nodes)
+            targets = filter_speed_nodes([dict(node) for node in nodes], cfg)
+            write_json(NODES_FILE, nodes)
+        set_state(
+            speed_test_running=True,
+            speed_test_current_node_id="",
+            speed_test_completed=0,
+            speed_test_total=len(targets),
+            speed_test_last_error="",
+        )
+        results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        succeeded = 0
+        failed = 0
+        skipped = 0
+        for completed, node in enumerate(targets, 1):
+            node_id = node.get("id")
+            set_state(speed_test_current_node_id=node_id or "")
+            with lock:
+                nodes = read_nodes()
+                saved = next((item for item in nodes if item.get("id") == node_id), None)
+                if saved is None:
+                    skipped += 1
+                    set_state(speed_test_completed=completed)
+                    continue
+                saved.update(speed_test_status="testing", speed_test_error="")
+                write_json(NODES_FILE, nodes)
+            result = speed_test_node(node, cfg["speed_test_url"])
+            with lock:
+                nodes = read_nodes()
+                saved = next((item for item in nodes if item.get("id") == node_id), None)
+                if saved is not None:
+                    saved.update(result)
+                    write_json(NODES_FILE, nodes)
+                    results.append((node, result))
+                    if result.get("speed_test_status") == "ok":
+                        succeeded += 1
+                    elif str(result.get("speed_test_status") or "").startswith("skipped"):
+                        skipped += 1
+                    else:
+                        failed += 1
+                else:
+                    skipped += 1
+            set_state(speed_test_completed=completed)
+
+        fastest = fastest_speed_result(results)
+        fastest_id = str(fastest.get("id") or "") if fastest else ""
+        error = ""
+        ok = not targets or succeeded > 0
+        if targets and succeeded == 0:
+            error = "全部测速失败"
+
+        latest_cfg = load_ui_config()
+        can_switch = (
+            fastest is not None
+            and latest_cfg.get("connection_enabled", True)
+            and current_connection_operation_version() == starting_version
+            and fastest_id != active_openvpn_node_id
+        )
+        if can_switch:
+            try:
+                connect_node(fastest_id, user_initiated=False)
+            except Exception as exc:
+                ok = False
+                error = f"测速成功，但切换最快节点失败：{exc}"
+
+        set_state(
+            speed_test_running=False,
+            speed_test_current_node_id="",
+            speed_test_last_at=int(time.time()),
+            speed_test_last_error=error,
+        )
+        response = {
+            "ok": ok,
+            "total": len(targets),
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+        }
+        if fastest_id:
+            response["fastest_node_id"] = fastest_id
+        if error:
+            response["error"] = error
+        return response
+    except Exception as exc:
+        error = f"测速任务失败：{exc}"
+        set_state(speed_test_running=False, speed_test_current_node_id="", speed_test_last_error=error)
+        return {"ok": False, "error": error}
+    finally:
+        if maintenance_acquired:
+            maintenance_lock.release()
+        speed_test_lock.release()
+
+def speed_test_loop() -> None:
+    first_run = True
+    retry_soon = False
+    while True:
+        cfg = load_ui_config()
+        timeout = 30 if first_run or retry_soon or not cfg["speed_test_enabled"] else cfg["speed_test_interval"]
+        triggered = speed_test_trigger.wait(timeout)
+        speed_test_trigger.clear()
+        manual_requested = consume_speed_test_request()
+        first_run = False
+        if manual_requested or (not triggered and cfg["speed_test_enabled"]):
+            result = speed_test_once()
+            retry_soon = not result.get("ok")
+        else:
+            retry_soon = False
 
 def test_node_by_id(node_id: str) -> dict[str, Any]:
     with lock:
@@ -1584,8 +2194,10 @@ def auto_switch_node(attempt: int = 0) -> None:
         
         threading.Thread(target=bg_fetch_and_switch, daemon=True).start()
 
-def connect_node(node_id: str) -> str:
+def connect_node(node_id: str, user_initiated: bool = False) -> str:
     global active_openvpn_process, active_openvpn_node_id, is_connecting
+    if user_initiated:
+        note_user_connection_operation()
     node_id = str(node_id or "").strip()
     if not node_id:
         raise ValueError("Node id is required")
@@ -1628,7 +2240,12 @@ def connect_node(node_id: str) -> str:
             raise RuntimeError(f"Failed to write configuration: {e}")
 
         set_state(active_node_latency="启动核心", last_check_message="正在启动 OpenVPN Core 核心服务并建立连接...")
-        ok, message, process = run_openvpn_until_ready(str(node["config_file"]), keep_alive=True, route_nopull=True)
+        ok, message, process = run_openvpn_until_ready(
+            str(node["config_file"]),
+            keep_alive=True,
+            route_nopull=True,
+            use_upstream_proxy=not global_residential_mode_enabled(),
+        )
         if not ok or process is None:
             try:
                 if config_path.exists():
@@ -1652,7 +2269,8 @@ def connect_node(node_id: str) -> str:
             active_openvpn_node_id = node_id
         
         set_state(active_node_latency="配置路由", last_check_message="正在配置策略路由规则与流量转发...")
-        setup_policy_routing("tun0")
+        setup_policy_routing("tun0", MAIN_ROUTE_TABLE, MAIN_RULE_PRIORITY)
+        refresh_global_residential_route()
         
         global last_active_ping_time, last_active_latency
         last_active_ping_time = time.time()
@@ -1708,7 +2326,7 @@ def connect_node(node_id: str) -> str:
             is_connecting = False
 
 def maintain_valid_nodes(force: bool = False) -> str:
-    global active_openvpn_process, active_openvpn_node_id, is_connecting
+    global active_openvpn_process, active_openvpn_node_id, is_connecting, node_refresh_running
     ensure_dirs()
     if not maintenance_lock.acquire(blocking=False):
         msg = "节点维护任务正在运行，请稍后再试"
@@ -1721,6 +2339,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
             set_state(last_check_message=msg)
             return msg
         is_connecting = True
+        node_refresh_running = True
     try:
         if force:
             with lock:
@@ -1782,20 +2401,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 if cand["id"] not in seen_ids:
                     previous = current_by_id.get(str(cand["id"]))
                     if previous:
-                        for key in [
-                            "probe_status",
-                            "probe_message",
-                            "latency_ms",
-                            "probed_at",
-                            "owner",
-                            "asn",
-                            "as_name",
-                            "location",
-                            "ip_type",
-                            "quality",
-                        ]:
-                            if previous.get(key) not in (None, ""):
-                                cand[key] = previous.get(key)
+                        preserve_node_runtime_fields(cand, previous)
                     merged.append(cand)
                     seen_ids.add(cand["id"])
                     
@@ -1930,6 +2536,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
         raise e
     finally:
         is_connecting = False
+        node_refresh_running = False
         maintenance_lock.release()
 
 
@@ -2957,17 +3564,22 @@ INDEX_HTML = r"""<!doctype html>
       .btn-group {
         width: 100%;
         margin-top: 12px;
+        gap: 8px;
+        flex-wrap: wrap;
       }
       .btn-group button, .btn-group .btn-telegram {
-        flex: 1;
+        flex: 1 1 calc(50% - 4px);
+        min-width: 150px;
       }
       .btn-group .dropdown {
-        flex: 1;
+        flex: 1 1 calc(50% - 4px);
+        min-width: 150px;
         display: flex;
       }
       .btn-group .dropdown button {
         width: 100%;
         flex: 1;
+        min-width: 0;
       }
       main {
         padding: 16px 20px;
@@ -3086,6 +3698,154 @@ INDEX_HTML = r"""<!doctype html>
       background-color: #0f172a;
       color: #f8fafc;
     }
+
+    .speed-modal-content {
+      max-width: 480px;
+      padding: 18px;
+      border-radius: 14px;
+    }
+    .speed-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .speed-modal-close {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 25px;
+      cursor: pointer;
+    }
+    .speed-modal-close:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-primary);
+    }
+    .speed-switch-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .speed-switch-item {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+      box-sizing: border-box;
+    }
+    .speed-switch {
+      appearance: none;
+      width: 42px;
+      height: 24px;
+      margin: 0;
+      border: 0;
+      border-radius: 999px;
+      background: #475569;
+      cursor: pointer;
+      position: relative;
+      flex: none;
+      transition: background 0.18s ease;
+    }
+    .speed-switch::after {
+      content: "";
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      top: 3px;
+      left: 3px;
+      border-radius: 50%;
+      background: white;
+      transition: transform 0.18s ease;
+    }
+    .speed-switch:checked {
+      background: var(--primary);
+    }
+    .speed-switch:checked::after {
+      transform: translateX(18px);
+    }
+    .speed-switch:focus-visible,
+    .speed-modal-close:focus-visible {
+      outline: 2px solid #a5b4fc;
+      outline-offset: 2px;
+    }
+    .speed-settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 14px;
+    }
+    .speed-field {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 5px;
+      min-width: 0;
+    }
+    .speed-field .form-label {
+      margin: 0;
+    }
+    .speed-field .input-field {
+      width: auto;
+      min-width: 118px;
+      max-width: 100%;
+      height: 36px;
+      padding: 0 10px;
+    }
+    .speed-field input[type="number"] {
+      width: 132px;
+    }
+    .speed-field-wide {
+      grid-column: 1 / -1;
+    }
+    .speed-field-wide .input-field {
+      width: 100%;
+    }
+    .speed-progress {
+      margin-top: 11px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.8);
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+    .speed-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 13px;
+    }
+    .speed-actions button {
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: 8px;
+    }
+
+    @media (max-width: 480px) {
+      .speed-modal-content {
+        padding: 14px;
+      }
+      .speed-switch-row {
+        gap: 7px;
+      }
+      .speed-switch-item {
+        padding: 0 8px;
+        font-size: 12px;
+      }
+    }
     
     /* Option Card Styles for Proxy/Routing Settings */
     .option-group {
@@ -3169,6 +3929,10 @@ INDEX_HTML = r"""<!doctype html>
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
       更新节点
     </button>
+    <button id="speed_settings_top" class="btn-primary" type="button" onclick="openSpeedModal()" style="background: rgba(99, 102, 241, 0.12); border: 1px solid rgba(99, 102, 241, 0.45); color: #c7d2fe;">
+      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+      测速设置
+    </button>
     <div class="dropdown">
       <button id="admin_btn" class="btn-primary" style="background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border-color); color: var(--text-primary);">
         <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
@@ -3221,7 +3985,7 @@ INDEX_HTML = r"""<!doctype html>
     </select>
     <select id="ip_type_filter">
       <option value="">所有IP类型</option>
-      <option value="residential">住宅IP</option>
+      <option value="residential">住宅 IP（含移动网络）</option>
       <option value="hosting">机房IP</option>
     </select>
     <button id="btn_favorites" class="toolbar-btn" type="button" onclick="toggleFavoritesView()" style="margin-left: auto; height: 42px; gap: 6px;">
@@ -3267,6 +4031,8 @@ INDEX_HTML = r"""<!doctype html>
             <th>物理位置</th>
             <th>运营主体 / ISP</th>
             <th style="width: 110px;">IP 类型</th>
+            <th style="width: 110px;">下载速度</th>
+            <th style="width: 160px;">测速时间</th>
             <th style="width: 180px;">操作</th>
           </tr>
         </thead>
@@ -3394,8 +4160,8 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="option-card-desc">机房 + 住宅</div>
               </div>
               <div class="option-card" data-value="residential" onclick="setRoutingIpType('residential')">
-                <div class="option-card-title">住宅IP</div>
-                <div class="option-card-desc">静态家宽</div>
+                <div class="option-card-title">住宅 IP</div>
+                <div class="option-card-desc">含移动网络</div>
               </div>
               <div class="option-card" data-value="hosting" onclick="setRoutingIpType('hosting')">
                 <div class="option-card-title">机房IP</div>
@@ -3412,6 +4178,36 @@ INDEX_HTML = r"""<!doctype html>
         <div style="display: flex; gap: 12px; justify-content: flex-end;">
           <button type="button" onclick="closeNetworkModal()" style="height: 40px; padding: 0 16px; font-weight: 600; border-radius: 8px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); cursor: pointer;">取消</button>
           <button type="submit" id="network_submit_btn" class="btn-primary" style="height: 40px; padding: 0 20px; font-weight: 600; border-radius: 8px;">保存修改</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- Speed Test Modal -->
+  <div id="speed_modal" class="modal">
+    <div class="modal-content speed-modal-content">
+      <div class="speed-modal-header">
+        <h3 style="margin:0; font-size:17px;">测速设置</h3>
+        <button type="button" class="speed-modal-close" aria-label="关闭测速设置" onclick="closeSpeedModal()">×</button>
+      </div>
+      <div id="speed_error" style="display:none; color:var(--danger); margin-bottom:12px;"></div>
+      <form onsubmit="saveSpeedSettings(event)">
+        <div class="speed-switch-row">
+          <label class="speed-switch-item" for="speed_enabled"><span>启用定时测速</span><input id="speed_enabled" class="speed-switch" type="checkbox"></label>
+          <label class="speed-switch-item" for="speed_favorites_only"><span>仅测速收藏节点</span><input id="speed_favorites_only" class="speed-switch" type="checkbox"></label>
+        </div>
+        <div class="speed-settings-grid">
+          <div class="speed-field"><label class="form-label" for="speed_country">国家</label><select id="speed_country" class="input-field"><option value="">全部国家</option></select></div>
+          <div class="speed-field"><label class="form-label" for="speed_ip_type">IP 类型</label><select id="speed_ip_type" class="input-field"><option value="all">全部</option><option value="residential">住宅 IP（含移动网络）</option><option value="hosting">机房 IP</option></select></div>
+          <div class="speed-field"><label class="form-label" for="speed_status">节点状态</label><select id="speed_status" class="input-field"><option value="all">全部</option><option value="available">可用</option><option value="testing">检测中</option><option value="unavailable">失效</option></select></div>
+          <div class="speed-field"><label class="form-label" for="speed_interval">测速周期（秒）</label><input id="speed_interval" class="input-field" type="number" min="3600" required></div>
+          <div class="speed-field speed-field-wide"><label class="form-label" for="speed_url">HTTPS 测速地址</label><input id="speed_url" class="input-field" type="url" pattern="https://.*" required></div>
+        </div>
+        <div id="speed_progress" class="speed-progress"></div>
+        <div class="speed-actions">
+          <button type="button" onclick="startSpeedTest()">立即测速</button>
+          <button type="submit" class="btn-primary">保存设置</button>
         </div>
       </form>
     </div>
@@ -3705,7 +4501,7 @@ function getFilteredNodes() {
       return false;
     }
     if (selectedIpType) {
-      if (selectedIpType === "residential" && !["residential", "mobile"].includes(n.ip_type)) {
+      if (selectedIpType === "residential" && n.ip_type === "hosting") {
         return false;
       }
       if (selectedIpType === "hosting" && n.ip_type !== "hosting") {
@@ -3750,9 +4546,9 @@ function render(){
   // Render separated Active Node Card
   const activeCardContainer = $("active_node_card");
   if (state.is_connecting && !activeNode) {
-    const busyTitle = state.maintenance_running ? "正在更新节点" : "正在连接";
-    const busyLatency = state.maintenance_running ? "节点检测中" : (state.active_node_latency || "正在连接...");
-    const busyMessage = state.last_check_message || (state.maintenance_running ? "正在后台拉取并检测节点，已完成的结果会实时显示在下方列表。" : "正在与 VPN 节点建立加密隧道，请稍候...");
+    const busyTitle = state.node_refresh_running ? "正在更新节点" : "正在连接";
+    const busyLatency = state.node_refresh_running ? "节点检测中" : (state.active_node_latency || "正在连接...");
+    const busyMessage = state.last_check_message || (state.node_refresh_running ? "正在后台拉取并检测节点，已完成的结果会实时显示在下方列表。" : "正在与 VPN 节点建立加密隧道，请稍候...");
     activeCardContainer.innerHTML = `
       <div class="active-card" style="background: var(--bg-surface); border-color: var(--warning); box-shadow: 0 0 15px rgba(245, 158, 11, 0.15);">
         <div class="active-card-info">
@@ -3832,7 +4628,9 @@ function render(){
   const statusMessage = state.last_check_message || "";
   const activeNodeInfo = activeNode ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${esc(translateCountry(activeNode.country))} (${activeNode.id})</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
   const localProxy = state.local_proxy || `http://127.0.0.1:${state.proxy_port || 7928}`;
-  if ($("status")) { $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：${localProxy} | 活动节点：${activeNodeInfo} | 状态：${statusMessage}`; }
+  const speedProgress = state.speed_test_running ? ` | 测速：${state.speed_test_completed || 0}/${state.speed_test_total || 0} ${esc(state.speed_test_current_node_id || "")}` : "";
+  if ($("status")) { $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：${localProxy} | 活动节点：${activeNodeInfo} | 状态：${statusMessage}${speedProgress}`; }
+  if ($("speed_progress")) $("speed_progress").textContent = state.speed_test_running ? `测速中：${state.speed_test_completed || 0}/${state.speed_test_total || 0} ${state.speed_test_current_node_id || ""}` : "当前没有测速任务";
   
   // Update proxy test status card based on background checks
   const pBadge = $("proxy_status_badge");
@@ -3908,9 +4706,11 @@ function render(){
       const latencyClass = getLatencyClass(n.latency_ms);
       const latencyText = n.latency_ms ? `<span class="latency-val ${latencyClass}">${n.latency_ms} ms</span>` : "-";
       const displayLocation = n.location || translateCountry(n.country) || "-";
+      const speedTime = n.speed_test_at ? time(n.speed_test_at) : "-";
       
       const isTesting = testingNodeIds.has(n.id) || n.probe_status === "testing";
       const testSpinner = `<svg style="animation: spin 1s linear infinite; width: 12px; height: 12px; display: inline-block; margin-right: 4px; vertical-align: middle;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" fill="none"></circle><path d="M4 12a8 8 0 018-8" stroke="currentColor" fill="none"></path></svg>`;
+      const speedText = n.speed_test_status === "testing" ? `${testSpinner}测速中` : (n.speed_test_status === "ok" ? `${(Number(n.speed_test_bps) / 1048576).toFixed(2)} MB/s` : (n.speed_test_status === "error" ? "失败" : "-"));
       const testBtnText = isTesting ? `${testSpinner}检测中` : '检测';
       const testBtn = `<button class="test-btn" data-node-id="${esc(n.id)}" ${isTesting ? 'disabled' : ''} onclick="testNode(this, '${esc(n.id)}', event)">${testBtnText}</button>`;
       
@@ -3933,6 +4733,8 @@ function render(){
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(displayLocation)}">${esc(displayLocation)}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.owner||n.as_name||"-")}">${esc(n.owner||n.as_name||"-")}</td>
         <td style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(translateIpType(n.ip_type))}">${esc(translateIpType(n.ip_type))}</td>
+        <td title="${esc(n.speed_test_error || "")}">${speedText}</td>
+        <td style="white-space:nowrap;">${esc(speedTime)}</td>
         <td>
           <div class="table-actions">
             ${favBtn}
@@ -4044,7 +4846,7 @@ function startRefreshPolling() {
       updateCountryFilter();
       render();
 
-      if (!state.maintenance_running) {
+      if (!state.node_refresh_running) {
         clearInterval(refreshPollInterval);
         refreshPollInterval = null;
         refreshButtonIdle();
@@ -4154,7 +4956,7 @@ async function load(){
   updateCountryFilter();
   render();
 
-  if (state.maintenance_running) {
+  if (state.node_refresh_running) {
     startRefreshPolling();
   } else if (state.is_connecting) {
     startConnectionPolling();
@@ -4387,7 +5189,6 @@ function handleRoutingModeChange(mode) {
 
 function populateRoutingCountries() {
   const select = $("net_force_country");
-  if (!select) return;
   const countMap = {};
   nodes.forEach(n => {
     const c = translateCountry(n.country);
@@ -4401,10 +5202,13 @@ function populateRoutingCountries() {
   countries.forEach(c => {
     html += `<option value="${esc(c)}">${esc(c)} (${countMap[c]}个节点)</option>`;
   });
-  select.innerHTML = html;
+  if (select) select.innerHTML = html;
+  const speedSelect = $("speed_country");
+  if (speedSelect) speedSelect.innerHTML = '<option value="">全部国家</option>' + countries.map(c => `<option value="${esc(c)}">${esc(c)} (${countMap[c]}个节点)</option>`).join("");
   
   if (state) {
-    select.value = state.force_country ? translateCountry(state.force_country) : "";
+    if (select) select.value = state.force_country ? translateCountry(state.force_country) : "";
+    if (speedSelect) speedSelect.value = state.speed_test_country ? translateCountry(state.speed_test_country) : "";
   }
 }
 
@@ -4540,6 +5344,56 @@ function openNetworkModal() {
 
 function closeNetworkModal() {
   $("network_modal").style.display = "none";
+}
+
+function openSpeedModal() {
+  populateRoutingCountries();
+  $("speed_error").style.display = "none";
+  $("speed_enabled").checked = state.speed_test_enabled !== false;
+  $("speed_ip_type").value = state.speed_test_ip_type || "all";
+  $("speed_status").value = state.speed_test_status || "all";
+  $("speed_favorites_only").checked = state.speed_test_favorites_only === true;
+  $("speed_interval").value = state.speed_test_interval || 3600;
+  $("speed_url").value = state.speed_test_url || "https://speed.cloudflare.com/__down?bytes=10485760";
+  $("speed_progress").textContent = state.speed_test_running ? `测速中：${state.speed_test_completed || 0}/${state.speed_test_total || 0}` : "当前没有测速任务";
+  $("speed_modal").style.display = "flex";
+  $("admin_dropdown").style.display = "none";
+}
+
+function closeSpeedModal() { $("speed_modal").style.display = "none"; }
+
+async function saveSpeedSettings(event) {
+  event.preventDefault();
+  const payload = {
+    enabled: $("speed_enabled").checked,
+    country: $("speed_country").value,
+    ip_type: $("speed_ip_type").value,
+    status: $("speed_status").value,
+    favorites_only: $("speed_favorites_only").checked,
+    interval: Number($("speed_interval").value),
+    url: $("speed_url").value.trim()
+  };
+  const res = await fetch("./api/update_speed_settings", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    $("speed_error").textContent = data.error || "保存失败";
+    $("speed_error").style.display = "block";
+    return;
+  }
+  closeSpeedModal();
+  load();
+}
+
+async function startSpeedTest() {
+  const res = await fetch("./api/start_speed_test", {method:"POST"});
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    $("speed_error").textContent = data.error || "启动失败";
+    $("speed_error").style.display = "block";
+    return;
+  }
+  $("speed_progress").textContent = `测速任务已启动，共 ${data.total} 个节点`;
+  load();
 }
 
 async function saveNetwork(e) {
@@ -5512,6 +6366,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        elif effective_path == "/api/update_speed_settings":
+            try:
+                validated = validate_speed_settings(self.read_json_body())
+                if not validated["ok"]:
+                    self.send_json(validated, HTTPStatus.BAD_REQUEST)
+                    return
+                ui_cfg = load_ui_config()
+                ui_cfg.update(validated["settings"])
+                with lock:
+                    DATA_DIR.mkdir(exist_ok=True, parents=True)
+                    write_json(DATA_DIR / "ui_auth.json", ui_cfg)
+                speed_test_trigger.set()
+                self.send_json({"ok": True, "message": "测速设置已保存"})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        elif effective_path == "/api/start_speed_test":
+            if speed_test_lock.locked():
+                self.send_json({"ok": False, "error": "测速任务正在运行"}, HTTPStatus.CONFLICT)
+                return
+            cfg = load_ui_config()
+            total = len(filter_speed_nodes(read_nodes(), cfg))
+            request_speed_test_run()
+            self.send_json({"ok": True, "total": total, "message": "测速任务已启动"})
+            return
+
         elif effective_path == "/api/update_routing":
             try:
                 payload = self.read_json_body()
@@ -5637,6 +6518,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/disconnect":
             try:
+                note_user_connection_operation()
                 ui_cfg = load_ui_config()
                 ui_cfg["connection_enabled"] = False
                 auth_file = DATA_DIR / "ui_auth.json"
@@ -5660,7 +6542,7 @@ class Handler(BaseHTTPRequestHandler):
         elif effective_path == "/api/connect":
             try:
                 payload = self.read_json_body()
-                self.send_json({"ok": True, "message": connect_node(str(payload.get("id") or ""))})
+                self.send_json({"ok": True, "message": connect_node(str(payload.get("id") or ""), user_initiated=True)})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/test_node":
@@ -5808,6 +6690,7 @@ def main() -> None:
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
     threading.Thread(target=active_node_pinger, daemon=True).start()
+    threading.Thread(target=speed_test_loop, daemon=True, name="speed-test").start()
     
     ui_cfg = load_ui_config()
     ui_host = ui_cfg.get("host", UI_HOST)

@@ -84,7 +84,14 @@ def check_credentials(username: str | None, password: str | None) -> bool:
         return True
     return secrets.compare_digest(username or "", expected_user) and secrets.compare_digest(password or "", expected_pass)
 
-def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) -> str | None:
+def dns_query_over_interface(
+    host: str,
+    qtype: int,
+    dns_server: str,
+    timeout: float,
+    interface: str,
+    mark: int | None = None,
+) -> str | None:
     import random
     sock = None
     try:
@@ -109,12 +116,14 @@ def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0")
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b"\0")
+            if mark is not None and hasattr(socket, "SO_MARK"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
         except OSError as e:
             if "operation not permitted" in str(e).lower() or e.errno == 1:
-                print("[DNS 绑定失败] [错误代码 3006] DNS 解析绑定 tun0 权限不足，请确保程序以 root 权限运行！", flush=True)
+                print(f"[DNS 绑定失败] [错误代码 3006] DNS 解析绑定 {interface} 权限不足，请确保程序以 root 权限运行！", flush=True)
             elif "no such device" in str(e).lower() or e.errno == 19:
-                print("[DNS 绑定失败] [错误代码 3004] DNS 解析绑定 tun0 失败，网卡设备不存在，请检查 VPN 连接！", flush=True)
+                print(f"[DNS 绑定失败] [错误代码 3004] DNS 解析绑定 {interface} 失败，网卡设备不存在！", flush=True)
             return None
         sock.sendto(packet, (dns_server, 53))
         resp, _ = sock.recvfrom(4096)
@@ -177,6 +186,9 @@ def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) 
     except Exception:
         return None
     return None
+
+def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) -> str | None:
+    return dns_query_over_interface(host, qtype, dns_server, timeout, "tun0")
 
 def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float = 3.0) -> str | None:
     try:
