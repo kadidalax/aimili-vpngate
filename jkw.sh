@@ -527,7 +527,7 @@ pause_menu() {
 }
 
 interactive_menu() {
-  local choice confirm
+  local choice
   while true; do
     show_menu
     read -r -p '请选择操作：' choice
@@ -537,15 +537,7 @@ interactive_menu() {
       3) toggle_global_mode; pause_menu ;;
       4) test_egress; pause_menu ;;
       5) undo_all; pause_menu ;;
-      6)
-        read -r -p '输入“确认卸载”继续：' confirm
-        if [[ "$confirm" == '确认卸载' ]]; then
-          uninstall_tool
-          return
-        fi
-        echo '已取消。'
-        pause_menu
-        ;;
+      6) uninstall_tool; return ;;
       7) environment_check; pause_menu ;;
       0) echo '已退出。'; return ;;
       *) echo '输入无效，请重新选择。'; pause_menu ;;

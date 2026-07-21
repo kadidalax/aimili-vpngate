@@ -33,6 +33,7 @@ class RepositoryLinkTests(unittest.TestCase):
     def test_web_ui_uses_owner_repository_without_ads(self):
         manager = (ROOT / "vpngate_manager.py").read_text(encoding="utf-8")
         self.assertIn("https://github.com/kadidalax/aimili-vpngate", manager)
+        self.assertNotIn('confirm("确定要断开当前的 VPN 连接吗？")', manager)
         for removed in (
             "baoweise-bot",
             "BandwagonHost",

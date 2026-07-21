@@ -4740,7 +4740,6 @@ async function connectNode(id){
 }
 
 async function disconnectNode(){
-  if (!confirm("确定要断开当前的 VPN 连接吗？")) return;
   try {
     const response = await fetch("./api/disconnect", { method: "POST" });
     const result = await response.json();
