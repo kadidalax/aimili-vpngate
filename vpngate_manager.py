@@ -4796,6 +4796,135 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .switch-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .switch-track {
+      position: absolute;
+      inset: 0;
+      background: rgba(148, 163, 184, 0.35);
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .switch-track::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: white;
+      transition: transform 0.2s;
+    }
+
+    .switch-input:checked + .switch-track {
+      background: var(--primary);
+    }
+
+    .switch-input:checked + .switch-track::after {
+      transform: translateX(20px);
+    }
+
+    .switch-input:disabled + .switch-track {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .switch-input:focus-visible + .switch-track {
+      outline: 2px solid #a5b4fc;
+      outline-offset: 2px;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .exit-status {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-top: 8px;
+      white-space: pre-line;
+    }
+
+    .speedtest-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+    }
+
+    .speedtest-countries {
+      max-height: 180px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.02);
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pipeline-panel {
+      display: none;
+      background: rgba(22, 30, 49, 0.97);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      border-radius: 16px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      animation: modalFadeIn 0.25s ease-out;
+    }
+
+    .pipeline-stages {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 10px 0;
+    }
+
+    .pipeline-stage {
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--border-color);
+      color: var(--text-secondary);
+    }
+
+    .pipeline-stage.done {
+      border-color: rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+
+    .pipeline-stage.current {
+      border-color: var(--primary);
+      background: rgba(99, 102, 241, 0.15);
+      color: var(--text-primary);
+    }
+
+    .speed-testing {
+      color: var(--warning);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     .option-card {
       width: 100%;
       height: auto;
@@ -4924,6 +5053,9 @@ INDEX_HTML = r"""<!doctype html>
     <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
       <!-- Rendered dynamically by render() -->
     </section>
+    <section id="pipeline_panel" class="pipeline-panel" aria-live="polite">
+      <!-- Rendered dynamically by render() -->
+    </section>
 
 
 
@@ -4959,7 +5091,17 @@ INDEX_HTML = r"""<!doctype html>
       <option value="residential">住宅IP</option>
       <option value="hosting">机房IP</option>
     </select>
-    <button id="btn_favorites" class="toolbar-btn" type="button" onclick="toggleFavoritesView()" style="margin-left: auto; height: 42px; gap: 6px;">
+    <select id="sort_mode" title="排序方式">
+      <option value="default">默认排序</option>
+      <option value="speed">按实测速度</option>
+    </select>
+    <button id="btn_speedtest" class="toolbar-btn" type="button" onclick="openSpeedtestModal()" style="margin-left: auto; height: 42px; gap: 6px;">
+      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+      </svg>
+      测速
+    </button>
+    <button id="btn_favorites" class="toolbar-btn" type="button" onclick="toggleFavoritesView()" style="height: 42px; gap: 6px;">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
         <path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.907c.961 0 1.371 1.24.588 1.81l-3.97 2.883a1 1 0 00-.364 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.971-2.883a1 1 0 00-1.175 0l-3.97 2.883c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.364-1.118l-3.97-2.883c-.783-.57-.372-1.81.588-1.81h4.906a1 1 0 00.951-.69l1.519-4.674z" />
       </svg>
@@ -5000,6 +5142,7 @@ INDEX_HTML = r"""<!doctype html>
             <th style="width: 90px;">状态</th>
             <th style="width: 220px;">IP 地址 : 端口</th>
             <th style="width: 125px;">延迟</th>
+            <th style="width: 130px;">实测速度</th>
             <th>物理位置</th>
             <th>运营主体 / ISP</th>
             <th style="width: 110px;">IP 类型</th>
@@ -5096,6 +5239,36 @@ INDEX_HTML = r"""<!doctype html>
 
         <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 16px; margin-bottom: 16px;">
           <div class="form-group" style="margin-bottom: 16px;">
+            <div class="switch-row">
+              <label class="form-label" for="net_global_exit" style="margin: 0;">全局出口（VPS 全部出站经 VPN）</label>
+              <span class="switch">
+                <input type="checkbox" id="net_global_exit" class="switch-input" onchange="toggleGlobalExit(this.checked)">
+                <span class="switch-track" onclick="const i=$('net_global_exit'); if(!i.disabled){ i.checked=!i.checked; i.dispatchEvent(new Event('change')); }"></span>
+              </span>
+            </div>
+            <div style="font-size: 12px; color: var(--danger); margin-top: 6px; line-height: 1.4;">⚠️ 开启后 VPS 所有出站流量经 VPN 节点；隧道断开时全部出站中断（SSH 与本面板不受影响）。</div>
+            <div id="global_exit_status" class="exit-status"></div>
+          </div>
+          <div class="form-group" style="margin-bottom: 16px;">
+            <div class="switch-row">
+              <label class="form-label" for="net_singbox_exit" style="margin: 0;">sing-box 出口接管</label>
+              <span class="switch">
+                <input type="checkbox" id="net_singbox_exit" class="switch-input" onchange="toggleSingboxExit(this.checked)">
+                <span class="switch-track" onclick="const i=$('net_singbox_exit'); if(!i.disabled){ i.checked=!i.checked; i.dispatchEvent(new Event('change')); }"></span>
+              </span>
+            </div>
+            <div id="singbox_exit_status" class="exit-status"></div>
+            <button type="button" id="btn_verify_singbox" class="test-btn" style="margin-top: 8px; height: 30px; padding: 0 12px;" onclick="verifySingboxExit()">验证出口</button>
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label class="form-label" for="net_check_interval_hours">节点检测周期（小时，1 至 72）</label>
+            <input type="number" id="net_check_interval_hours" class="input-field" min="1" max="72" step="1" placeholder="24">
+            <div id="next_check_label" class="exit-status"></div>
+          </div>
+        </div>
+
+        <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 16px; margin-bottom: 16px;">
+          <div class="form-group" style="margin-bottom: 16px;">
             <label class="form-label">IP 出站路由模式</label>
             <input type="hidden" id="net_routing_mode" value="auto">
             <div class="option-group" id="routing_mode_group">
@@ -5153,6 +5326,96 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </div>
 
+
+  <div id="speedtest_modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="speedtest_modal_title" aria-hidden="true">
+    <div class="modal-content" tabindex="-1" style="max-width: 560px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 id="speedtest_modal_title" style="margin: 0; font-size: 18px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:20px; height:20px; color: var(--primary);" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+          节点测速
+        </h3>
+        <button type="button" aria-label="关闭节点测速" onclick="closeSpeedtestModal()" style="background: transparent; border: none; padding: 4px; cursor: pointer; color: var(--text-secondary); width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%;" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='transparent'">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+      </div>
+
+      <div id="speedtest_error" role="alert" style="color: var(--danger); font-size: 13px; margin-bottom: 16px; padding: 8px 12px; background: rgba(244,63,94,0.1); border: 1px solid rgba(244,63,94,0.2); border-radius: 6px; display: none;"></div>
+      <div id="speedtest_success" role="status" aria-live="polite" style="color: var(--success); font-size: 13px; margin-bottom: 16px; padding: 8px 12px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); border-radius: 6px; display: none;"></div>
+
+      <form id="speedtest_form" onsubmit="event.preventDefault(); saveSpeedtestSettings(false);">
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label class="form-label" for="st_status">测速范围（节点状态）</label>
+          <select id="st_status" class="input-field" style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-color); color: var(--text-primary); width: 100%; height: 40px; border-radius: 8px; padding: 0 12px;">
+            <option value="available">仅可用节点</option>
+            <option value="unavailable">仅失效节点</option>
+            <option value="all">全部节点</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label class="form-label">国家范围（不选则全部）</label>
+          <div id="st_countries" class="country-filter-options speedtest-countries"></div>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label class="form-label">IP 类型（不选则全部）</label>
+          <div id="st_ip_types" style="display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--text-primary);">
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;"><input type="checkbox" class="st-ip-type" value="residential"> 住宅</label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;"><input type="checkbox" class="st-ip-type" value="mobile"> 移动</label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;"><input type="checkbox" class="st-ip-type" value="hosting"> 机房</label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;"><input type="checkbox" class="st-ip-type" value="unknown"> 未知</label>
+          </div>
+        </div>
+        <div class="speedtest-grid" style="margin-bottom: 14px;">
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_retest_hours">重复测速间隔（小时）</label>
+            <input type="number" id="st_retest_hours" class="input-field" min="0" max="720" step="1">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_seconds">单节点测速秒数</label>
+            <input type="number" id="st_seconds" class="input-field" min="3" max="60" step="1">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_max_mb">单节点最大流量（MB）</label>
+            <input type="number" id="st_max_mb" class="input-field" min="1" max="500" step="1">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_threshold">达标即停阈值（MB/s，0 不停）</label>
+            <input type="number" id="st_threshold" class="input-field" min="0" max="1000" step="0.1">
+            <div id="st_threshold_mbit" class="exit-status" style="margin-top: 4px;"></div>
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_margin">切换滞后（%）</label>
+            <input type="number" id="st_margin" class="input-field" min="0" max="500" step="1">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_url">测速地址</label>
+            <input type="text" id="st_url" class="input-field" placeholder="https://...">
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;">
+          <div class="switch-row">
+            <label class="form-label" for="st_auto" style="margin: 0;">每轮检测后自动测速</label>
+            <span class="switch">
+              <input type="checkbox" id="st_auto" class="switch-input">
+              <span class="switch-track" onclick="const i=$('st_auto'); i.checked=!i.checked; i.dispatchEvent(new Event('input', {bubbles: true}));"></span>
+            </span>
+          </div>
+          <div class="switch-row">
+            <label class="form-label" for="st_auto_switch" style="margin: 0;">自动切换最快节点</label>
+            <span class="switch">
+              <input type="checkbox" id="st_auto_switch" class="switch-input">
+              <span class="switch-track" onclick="const i=$('st_auto_switch'); i.checked=!i.checked; i.dispatchEvent(new Event('input', {bubbles: true}));"></span>
+            </span>
+          </div>
+        </div>
+        <div id="st_estimate" style="font-size: 12px; color: var(--text-secondary); line-height: 1.5; padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 6px; margin-bottom: 16px;">正在估算...</div>
+        <div style="display: flex; gap: 12px; justify-content: flex-end;">
+          <button type="button" onclick="closeSpeedtestModal()" style="height: 40px; padding: 0 16px; font-weight: 600; border-radius: 8px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); cursor: pointer;">取消</button>
+          <button type="submit" id="st_save" style="height: 40px; padding: 0 16px; font-weight: 600; border-radius: 8px; border: 1px solid var(--border-color); background: transparent; color: var(--text-primary); cursor: pointer;">保存设置</button>
+          <button type="button" id="st_save_start" class="btn-primary" style="height: 40px; padding: 0 20px; font-weight: 600; border-radius: 8px;" onclick="saveSpeedtestSettings(true)">保存并开始测速</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <!-- VPS 购买推荐 Modal -->
   <div id="vps_recommend_modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="vps_modal_title" aria-hidden="true">
@@ -5645,10 +5908,16 @@ function clearDiscoveryCountries(event) {
   render();
 }
 
+function nodeSpeedValue(n) {
+  const value = Number(n && n.speed_mbps);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function getFilteredNodes() {
   const selectedIpType = $("ip_type_filter").value;
   const selectedStatus = $("status_filter").value;
-  return nodes.filter(n => {
+  const sortMode = $("sort_mode") ? $("sort_mode").value : "default";
+  const filtered = nodes.filter(n => {
     if (!n) return false;
     const countryCode = String(n.country_short || "").trim().toUpperCase();
     if (selectedDiscoveryCountries.size && !selectedDiscoveryCountries.has(countryCode)) {
@@ -5677,6 +5946,15 @@ function getFilteredNodes() {
     }
     return true;
   });
+  if (sortMode === "speed") {
+    filtered.sort((a, b) => {
+      const aSpeed = nodeSpeedValue(a);
+      const bSpeed = nodeSpeedValue(b);
+      if (bSpeed !== aSpeed) return bSpeed - aSpeed;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
+  }
+  return filtered;
 }
 
 function stableSortNodes() {
@@ -5752,6 +6030,7 @@ function render(){
             <div class="active-card-meta" style="margin-top: 4px;">
               <span title="IP 情报源推测位置；节点申报国家见标题">物理位置: <strong>${locationFlag ? `${esc(locationFlag)} ` : ""}${esc(displayLocation)}</strong></span>
               <span style="margin-left: 12px;">延时: <strong>${latencyText}</strong></span>
+              <span style="margin-left: 12px;">实测速度: <strong>${speedCellHtml(activeNode)}</strong></span>
               <span style="margin-left: 12px;">运营主体: <strong>${esc(activeNode.owner || activeNode.as_name || "-")}</strong></span>
               <span style="margin-left: 12px;" title="${esc(ipTypeTitle)}">IP 类型: <strong>${esc(translateIpType(activeNode.ip_type))}</strong></span>
             </div>
@@ -5783,6 +6062,8 @@ function render(){
     `;
   }
   setHtmlIfChanged(activeCardContainer, activeCardHtml);
+  renderPipelinePanel();
+  if ($("network_modal") && $("network_modal").getAttribute("aria-hidden") === "false") renderExitStatus();
 
   const shown = getFilteredNodes();
   
@@ -5860,7 +6141,7 @@ function render(){
   // Render table rows
   let rowsHtml = "";
   if (currentPageNodes.length === 0) {
-    rowsHtml = `<tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
+    rowsHtml = `<tr><td colspan="8" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
   } else {
     rowsHtml = currentPageNodes.map(n=>{
       if (!n) return '';
@@ -5901,6 +6182,7 @@ function render(){
         <td><span class="badge ${badgeClass}">${badgeText}</span></td>
         <td class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
         <td style="white-space: nowrap;">${latencyText}</td>
+        <td style="white-space: nowrap;">${speedCellHtml(n)}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(locationTitle)}">${flag ? `<span aria-hidden="true">${esc(flag)}</span> ` : ""}${esc(displayLocation)}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.owner||n.as_name||"-")}">${esc(n.owner||n.as_name||"-")}</td>
         <td style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(ipTypeTitle)}">${esc(translateIpType(n.ip_type))}</td>
@@ -6032,7 +6314,7 @@ function applyNodesSnapshot(data) {
   return true;
 }
 
-function refreshButtonBusy(message = "正在后台更新...") {
+function refreshButtonBusy(message = "任务进行中...") {
   const btn = $("refresh");
   if (!btn) return;
   btn.disabled = true;
@@ -6048,7 +6330,7 @@ function refreshButtonIdle() {
 
 function startRefreshPolling() {
   if (refreshPollInterval) clearInterval(refreshPollInterval);
-  refreshButtonBusy("正在检测节点...");
+  refreshButtonBusy("任务进行中...");
   refreshPollInterval = setInterval(async () => {
     if (refreshPollInFlight || !isPageVisible()) return;
     refreshPollInFlight = true;
@@ -6145,7 +6427,11 @@ async function connectNode(id){
 
 async function disconnectNode(){
   if (disconnectInFlight) return;
-  if (!confirm("确定要断开当前的 VPN 连接吗？")) return;
+  const globalExitOn = Boolean(state && state.global_exit && state.global_exit.enabled);
+  const disconnectPrompt = globalExitOn
+    ? "断开后将同时关闭全局出口开关，服务器恢复直连出站。确定断开？"
+    : "确定要断开当前的 VPN 连接吗？";
+  if (!confirm(disconnectPrompt)) return;
   disconnectInFlight = true;
   render();
   try {
@@ -6197,6 +6483,7 @@ document.addEventListener("keydown", event => {
 });
 $("ip_type_filter").onchange=()=>{ currentPage = 1; render(); };
 $("status_filter").onchange=()=>{ currentPage = 1; render(); };
+if ($("sort_mode")) $("sort_mode").onchange=()=>{ currentPage = 1; render(); };
 
 $("refresh").onclick=async()=>{
   refreshButtonBusy("正在启动更新...");
@@ -6651,8 +6938,10 @@ function openNetworkModal() {
     
     selectOptionCard('routing_mode', mode);
     selectOptionCard('routing_ip_type', ipType);
+    $("net_check_interval_hours").value = state.check_interval_hours || 24;
   }
-  
+  renderExitStatus();
+
   populateRoutingCountries();
   showModal("network_modal", "#net_proxy_port");
   $("admin_dropdown").style.display = "none";
@@ -6660,6 +6949,370 @@ function openNetworkModal() {
 
 function closeNetworkModal() {
   hideModal("network_modal");
+}
+
+// ---- v2.2.0: exit switches, interval, speed test, pipeline ----
+function formatDurationZh(totalSeconds) {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  if (minutes > 0) return `${minutes} 分钟`;
+  return `${seconds} 秒`;
+}
+
+function formatSpeed(mbps) {
+  const value = Number(mbps);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  return `${value.toFixed(2)} MB/s`;
+}
+
+function speedCellHtml(n) {
+  if (!n) return "-";
+  const pipeline = state.pipeline || {};
+  if (pipeline.running && pipeline.current_node_id && pipeline.current_node_id === n.id) {
+    return '<span class="speed-testing"><span class="badge-pulse" style="background: var(--warning);"></span>测速中</span>';
+  }
+  const value = Number(n.speed_mbps);
+  if (!Number.isFinite(value) || value <= 0) {
+    return n.speed_message ? `<span title="${esc(n.speed_message)}">-</span>` : "-";
+  }
+  const parts = [`${(value * 8).toFixed(1)} Mbps`];
+  if (n.speed_message) parts.push(String(n.speed_message));
+  if (n.speed_tested_at) parts.push("测速时间：" + new Date(Number(n.speed_tested_at) * 1000).toLocaleString());
+  return `<span class="mono" title="${esc(parts.join("；"))}">${esc(formatSpeed(value))}</span>`;
+}
+
+function renderExitStatus() {
+  const sb = (state && state.singbox_exit) || {};
+  const ge = (state && state.global_exit) || {};
+  const activeNode = nodes.find(n => n && n.active);
+  const sbInput = $("net_singbox_exit");
+  const geInput = $("net_global_exit");
+  if (!sbInput || !geInput) return;
+
+  geInput.checked = Boolean(ge.enabled);
+  geInput.disabled = !ge.supported || exitRequestInFlight;
+  const geLines = [];
+  if (!ge.supported) {
+    geLines.push("当前环境不支持：" + (ge.unsupported_reason || "未知原因"));
+  } else if (ge.applied) {
+    geLines.push(`已接管：物理网卡 ${ge.physical_interface || "?"}，IP ${(ge.physical_ips || []).join(", ") || "?"}`);
+    if (!activeNode) geLines.push("⚠️ 隧道未连接，服务器出站当前已中断（fail-closed）");
+  } else if (ge.enabled) {
+    geLines.push("已开启，规则尚未生效");
+  } else {
+    geLines.push("已关闭，服务器直连出站");
+  }
+  if (ge.last_error) geLines.push("错误：" + ge.last_error);
+  $("global_exit_status").textContent = geLines.join("\n");
+
+  sbInput.checked = Boolean(sb.enabled);
+  sbInput.disabled = !sb.supported || Boolean(ge.enabled) || exitRequestInFlight;
+  const sbLines = [];
+  if (!sb.supported) {
+    sbLines.push("当前环境不支持：" + (sb.unsupported_reason || "未知原因"));
+  } else {
+    if (ge.enabled) sbLines.push("全局出口开启期间由系统接管，无需单独配置");
+    else sbLines.push(sb.applied ? "已接管 sing-box 出站" : (sb.enabled ? "已开启，配置尚未生效" : "已关闭，sing-box 直连出站"));
+    if (sb.service_active === false) sbLines.push("sing-box 服务未运行");
+    if (sb.verified && typeof sb.verified === "object") {
+      sbLines.push(`验证：最近 ${sb.verified.total || 0} 条连接中 ${sb.verified.via_tunnel || 0} 条经隧道`);
+    }
+    if (sb.applied && !activeNode) sbLines.push("⚠️ 隧道未连接，sing-box 出站当前已中断（fail-closed）");
+  }
+  if (sb.last_error) sbLines.push("错误：" + sb.last_error);
+  $("singbox_exit_status").textContent = sbLines.join("\n");
+  $("btn_verify_singbox").disabled = !sb.supported || !sb.applied || exitRequestInFlight;
+
+  const nextAt = Number(state && state.next_check_at) || 0;
+  const remaining = nextAt - Date.now() / 1000;
+  const pipelineRunning = Boolean(state && state.pipeline && state.pipeline.running);
+  $("next_check_label").textContent = pipelineRunning
+    ? "任务进行中，结束后重新计时"
+    : (nextAt > 0 ? (remaining > 0 ? `下次自动检测：${formatDurationZh(remaining)}后` : "下次自动检测：即将开始") : "");
+}
+
+let exitRequestInFlight = false;
+
+function showNetworkError(message) {
+  const el = $("network_error");
+  el.textContent = message;
+  el.style.display = "block";
+}
+
+async function postExitSwitch(url, enabled, failMessage) {
+  const response = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: Boolean(enabled) })
+  }, 60000);
+  const result = await readJsonResponse(response, failMessage);
+  if (!response.ok || !result.ok) {
+    throw new Error(result.error || failMessage);
+  }
+  return result;
+}
+
+async function toggleGlobalExit(enabled) {
+  if (exitRequestInFlight) return;
+  $("network_error").style.display = "none";
+  if (enabled && !confirm("开启后 VPS 所有出站流量经 VPN 节点，隧道断开时全部出站中断（SSH 与面板不受影响）。确定开启？")) {
+    $("net_global_exit").checked = false;
+    return;
+  }
+  exitRequestInFlight = true;
+  renderExitStatus();
+  try {
+    const result = await postExitSwitch("./api/global_exit", enabled, "切换全局出口失败");
+    state.global_exit = result.status || state.global_exit;
+    state.singbox_exit = result.singbox_exit || state.singbox_exit;
+  } catch (e) {
+    showNetworkError(e.message || "切换全局出口失败");
+    $("net_global_exit").checked = !enabled;
+  } finally {
+    exitRequestInFlight = false;
+    renderExitStatus();
+    load().catch(() => {});
+  }
+}
+
+async function toggleSingboxExit(enabled) {
+  if (exitRequestInFlight) return;
+  $("network_error").style.display = "none";
+  exitRequestInFlight = true;
+  renderExitStatus();
+  try {
+    const result = await postExitSwitch("./api/singbox_exit", enabled, "切换 sing-box 出口失败");
+    state.singbox_exit = result.status || state.singbox_exit;
+  } catch (e) {
+    showNetworkError(e.message || "切换 sing-box 出口失败");
+    $("net_singbox_exit").checked = !enabled;
+  } finally {
+    exitRequestInFlight = false;
+    renderExitStatus();
+    load().catch(() => {});
+  }
+}
+
+async function verifySingboxExit() {
+  if (exitRequestInFlight) return;
+  $("network_error").style.display = "none";
+  exitRequestInFlight = true;
+  const btn = $("btn_verify_singbox");
+  btn.textContent = "验证中...";
+  renderExitStatus();
+  try {
+    const response = await fetchWithTimeout("./api/singbox_exit/verify", { method: "POST" }, 20000);
+    const result = await readJsonResponse(response, "验证失败");
+    if (!response.ok || !result.ok) throw new Error(result.error || "验证失败");
+    if (result.status) state.singbox_exit = result.status;
+    if (!result.verified) showNetworkError("无法读取 sing-box Clash API，请确认已开启 clash_api 且服务在运行");
+  } catch (e) {
+    showNetworkError(e.message || "验证失败");
+  } finally {
+    exitRequestInFlight = false;
+    btn.textContent = "验证出口";
+    renderExitStatus();
+  }
+}
+
+function renderPipelinePanel() {
+  const panel = $("pipeline_panel");
+  if (!panel) return;
+  const pipeline = (state && state.pipeline) || {};
+  if (!pipeline.running) {
+    if (panel.style.display !== "none") {
+      panel.style.display = "none";
+      panel.innerHTML = "";
+    }
+    return;
+  }
+  const stages = [["fetch", "获取"], ["probe", "检测"], ["speedtest", "测速"], ["switch", "切换"]];
+  const activeStages = pipeline.with_speedtest ? stages : stages.slice(0, 2);
+  const currentIndex = activeStages.findIndex(([key]) => key === pipeline.stage);
+  const stageHtml = activeStages.map(([key, label], index) => {
+    const cls = index < currentIndex ? "done" : (index === currentIndex ? "current" : "");
+    return `<span class="pipeline-stage ${cls}">${esc(label)}</span>`;
+  }).join("");
+  const triggerLabel = {periodic: "周期任务", manual_update: "手动更新", manual_speedtest: "手动测速", forced: "强制检测"}[pipeline.trigger] || "任务";
+  const details = [];
+  if (pipeline.stage === "probe" || pipeline.probe_total) details.push(`检测 ${pipeline.probe_done || 0}/${pipeline.probe_total || 0}`);
+  if (pipeline.with_speedtest && (pipeline.stage === "speedtest" || pipeline.speed_total)) details.push(`测速 ${pipeline.speed_done || 0}/${pipeline.speed_total || 0}`);
+  if (pipeline.current_node_id) details.push(`当前节点 ${pipeline.current_node_id}`);
+  if (pipeline.best_node_id) details.push(`最快 ${pipeline.best_node_id}（${formatSpeed(pipeline.best_speed_mbps)}）`);
+  const stopLabel = pipeline.stop_requested ? "正在停止..." : "停止任务";
+  const html = `
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+      <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0;">
+        <span style="font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+          <span class="badge-pulse" style="background: var(--primary);"></span>${esc(triggerLabel)}进行中
+        </span>
+        <div class="pipeline-stages">${stageHtml}</div>
+        <span style="font-size: 13px; color: var(--text-secondary);">${esc(details.join(" · ") || (pipeline.message || "正在获取节点列表..."))}</span>
+      </div>
+      <button type="button" class="btn-danger" ${pipeline.stop_requested ? "disabled" : ""} style="height: 36px; padding: 0 14px; border-radius: 8px;" onclick="stopPipeline()">${esc(stopLabel)}</button>
+    </div>`;
+  panel.style.display = "block";
+  setHtmlIfChanged(panel, html);
+}
+
+async function stopPipeline() {
+  try {
+    const response = await fetchWithTimeout("./api/pipeline/stop", { method: "POST" }, 15000);
+    const result = await readJsonResponse(response, "停止任务失败");
+    if (!response.ok || !result.ok) throw new Error(result.error || "停止任务失败");
+    if (state.pipeline) state.pipeline.stop_requested = true;
+    renderPipelinePanel();
+  } catch (e) {
+    alert("停止任务失败: " + (e.message || "未知错误"));
+  }
+}
+
+let speedtestEstimateTimer = null;
+let speedtestEstimateSeq = 0;
+
+function populateSpeedtestCountries(selected) {
+  const container = $("st_countries");
+  if (!container) return;
+  const selectedSet = new Set((selected || []).map(code => String(code).toUpperCase()));
+  const countries = new Map();
+  nodes.forEach(n => {
+    const code = String(n && n.country_short || "").trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(code)) return;
+    const entry = countries.get(code) || {code, name: translateCountry(n.country) || code, count: 0};
+    entry.count += 1;
+    countries.set(code, entry);
+  });
+  const options = Array.from(countries.values()).sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.code.localeCompare(b.code));
+  container.innerHTML = options.length
+    ? options.map(item => `
+        <label class="country-option">
+          <input class="country-option-input st-country" type="checkbox" value="${esc(item.code)}" ${selectedSet.has(item.code) ? "checked" : ""}>
+          <span class="country-option-box" aria-hidden="true"></span>
+          <span class="country-option-flag" aria-hidden="true">${esc(countryFlag(item.code))}</span>
+          <span class="country-option-name">${esc(item.name)}</span>
+          <span class="country-option-count">${item.count}</span>
+        </label>`).join("")
+    : '<div style="padding:12px; color:var(--text-secondary); font-size:13px;">暂无国家数据</div>';
+}
+
+function readSpeedtestForm() {
+  return {
+    status: $("st_status").value,
+    countries: Array.from(document.querySelectorAll(".st-country:checked")).map(el => el.value),
+    ip_types: Array.from(document.querySelectorAll(".st-ip-type:checked")).map(el => el.value),
+    retest_after_hours: Number($("st_retest_hours").value),
+    per_node_seconds: Number($("st_seconds").value),
+    per_node_max_mb: Number($("st_max_mb").value),
+    stop_threshold_mbps: Number($("st_threshold").value),
+    switch_margin_percent: Number($("st_margin").value),
+    url: $("st_url").value.trim(),
+    auto_after_check: $("st_auto").checked,
+    auto_switch_fastest: $("st_auto_switch").checked,
+  };
+}
+
+function updateThresholdMbit() {
+  const value = Number($("st_threshold").value);
+  $("st_threshold_mbit").textContent = Number.isFinite(value) && value > 0 ? `约 ${(value * 8).toFixed(1)} Mbps` : "0 表示测满设定时长或流量";
+}
+
+function scheduleSpeedtestEstimate() {
+  updateThresholdMbit();
+  if (speedtestEstimateTimer) clearTimeout(speedtestEstimateTimer);
+  speedtestEstimateTimer = setTimeout(refreshSpeedtestEstimate, 500);
+}
+
+async function refreshSpeedtestEstimate() {
+  const seq = ++speedtestEstimateSeq;
+  const el = $("st_estimate");
+  try {
+    const response = await fetchWithTimeout("./api/speedtest/estimate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readSpeedtestForm())
+    }, 15000);
+    const result = await readJsonResponse(response, "估算失败");
+    if (seq !== speedtestEstimateSeq) return;
+    if (!response.ok || !result.ok) throw new Error(result.error || "估算失败");
+    el.textContent = `预计测 ${result.count} 个节点，最多约 ${result.max_mb} MB，约 ${formatDurationZh(result.est_seconds)}`;
+  } catch (e) {
+    if (seq !== speedtestEstimateSeq) return;
+    el.textContent = "估算失败：" + (e.message || "未知错误");
+  }
+}
+
+function openSpeedtestModal() {
+  $("speedtest_error").style.display = "none";
+  $("speedtest_success").style.display = "none";
+  const settings = (state && state.speedtest_settings) || {};
+  $("st_status").value = settings.status || "available";
+  populateSpeedtestCountries(settings.countries || []);
+  const ipTypes = new Set(settings.ip_types || []);
+  document.querySelectorAll(".st-ip-type").forEach(el => { el.checked = ipTypes.has(el.value); });
+  $("st_retest_hours").value = settings.retest_after_hours ?? 12;
+  $("st_seconds").value = settings.per_node_seconds ?? 8;
+  $("st_max_mb").value = settings.per_node_max_mb ?? 20;
+  $("st_threshold").value = settings.stop_threshold_mbps ?? 0;
+  $("st_margin").value = settings.switch_margin_percent ?? 20;
+  $("st_url").value = settings.url || "";
+  $("st_auto").checked = Boolean(settings.auto_after_check);
+  $("st_auto_switch").checked = Boolean(settings.auto_switch_fastest);
+  const running = Boolean(state && state.pipeline && state.pipeline.running);
+  $("st_save_start").disabled = running;
+  $("st_save_start").textContent = running ? "任务进行中..." : "保存并开始测速";
+  updateThresholdMbit();
+  $("st_estimate").textContent = "正在估算...";
+  refreshSpeedtestEstimate();
+  showModal("speedtest_modal", "#st_status");
+}
+
+function closeSpeedtestModal() {
+  hideModal("speedtest_modal");
+}
+
+async function saveSpeedtestSettings(start) {
+  const errorEl = $("speedtest_error");
+  const successEl = $("speedtest_success");
+  errorEl.style.display = "none";
+  successEl.style.display = "none";
+  const saveBtn = $("st_save");
+  const startBtn = $("st_save_start");
+  saveBtn.disabled = true;
+  startBtn.disabled = true;
+  try {
+    const response = await fetchWithTimeout("./api/speedtest/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readSpeedtestForm())
+    }, 15000);
+    const result = await readJsonResponse(response, "保存测速设置失败");
+    if (!response.ok || !result.ok) throw new Error(result.error || "保存测速设置失败");
+    state.speedtest_settings = result.settings || state.speedtest_settings;
+    if (start) {
+      const startResponse = await fetchWithTimeout("./api/pipeline/speedtest", { method: "POST" }, 15000);
+      const startResult = await readJsonResponse(startResponse, "启动测速失败");
+      if (!startResponse.ok || !startResult.ok) throw new Error(startResult.error || "启动测速失败");
+      closeSpeedtestModal();
+      startRefreshPolling();
+      return;
+    }
+    successEl.textContent = "测速设置已保存";
+    successEl.style.display = "block";
+    setTimeout(() => closeSpeedtestModal(), 1000);
+  } catch (e) {
+    errorEl.textContent = e.message || "保存失败";
+    errorEl.style.display = "block";
+  } finally {
+    saveBtn.disabled = false;
+    startBtn.disabled = Boolean(state && state.pipeline && state.pipeline.running);
+  }
+}
+
+if ($("speedtest_form")) {
+  $("speedtest_form").addEventListener("input", scheduleSpeedtestEstimate);
+  $("speedtest_form").addEventListener("change", scheduleSpeedtestEstimate);
 }
 
 async function saveNetwork(e) {
@@ -6675,7 +7328,13 @@ async function saveNetwork(e) {
   const routingMode = $("net_routing_mode").value;
   const forceCountry = $("net_force_country").value;
   const routingIpType = $("net_routing_ip_type").value;
-  
+  const checkIntervalHours = parseInt($("net_check_interval_hours").value);
+
+  if (isNaN(checkIntervalHours) || checkIntervalHours < 1 || checkIntervalHours > 72) {
+    errorDivEl.textContent = "节点检测周期必须在 1 至 72 小时之间";
+    errorDivEl.style.display = "block";
+    return;
+  }
   if (isNaN(proxyPort) || proxyPort < 1024 || proxyPort > 65535) {
     errorDivEl.textContent = "代理出站端口范围必须在 1024 至 65535 之间";
     errorDivEl.style.display = "block";
@@ -6710,7 +7369,8 @@ async function saveNetwork(e) {
         proxy_port: proxyPort,
         routing_mode: routingMode,
         force_country: forceCountry,
-        routing_ip_type: routingIpType
+        routing_ip_type: routingIpType,
+        check_interval_hours: checkIntervalHours
       })
     }, 25000);
     const data = await readJsonResponse(res, "保存代理设置失败");

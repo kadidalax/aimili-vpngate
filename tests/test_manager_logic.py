@@ -1859,9 +1859,30 @@ class ManagerLogicTests(unittest.TestCase):
 
     def test_node_table_contains_latency_country_panel_and_test_action(self) -> None:
         self.assertIn('<th style="width: 125px;">延迟</th>', manager.INDEX_HTML)
-        self.assertIn('colspan="7"', manager.INDEX_HTML)
+        self.assertIn('<th style="width: 130px;">实测速度</th>', manager.INDEX_HTML)
+        self.assertIn('colspan="8"', manager.INDEX_HTML)
+        self.assertNotIn('colspan="7"', manager.INDEX_HTML)
         self.assertIn('class="country-option-input"', manager.INDEX_HTML)
         self.assertIn('${testBtn}', manager.INDEX_HTML)
+        self.assertIn('${speedCellHtml(n)}', manager.INDEX_HTML)
+
+    def test_dashboard_contains_v220_controls(self) -> None:
+        html = manager.INDEX_HTML
+        for element_id in (
+            "net_global_exit", "global_exit_status", "net_singbox_exit", "singbox_exit_status",
+            "btn_verify_singbox", "net_check_interval_hours", "next_check_label",
+            "btn_speedtest", "sort_mode", "speedtest_modal", "st_status", "st_countries", "st_ip_types",
+            "st_retest_hours", "st_seconds", "st_max_mb", "st_threshold", "st_threshold_mbit", "st_margin",
+            "st_url", "st_auto", "st_auto_switch", "st_estimate", "st_save", "st_save_start", "pipeline_panel",
+        ):
+            self.assertIn(f'id="{element_id}"', html, element_id)
+        for text in (
+            "隧道断开时全部出站中断", "断开后将同时关闭全局出口开关", "任务进行中...", "测速中", "停止任务",
+            "./api/global_exit", "./api/singbox_exit", "./api/singbox_exit/verify", "./api/speedtest/settings",
+            "./api/speedtest/estimate", "./api/pipeline/speedtest", "./api/pipeline/stop",
+            "check_interval_hours: checkIntervalHours", 'sortMode === "speed"', "class=\"switch-input\"",
+        ):
+            self.assertIn(text, html, text)
 
     def test_web_dashboard_has_browser_freeze_safeguards(self) -> None:
         self.assertNotIn("backdrop-filter", manager.LOGIN_HTML)
