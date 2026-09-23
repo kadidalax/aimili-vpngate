@@ -60,6 +60,7 @@ class SingboxExitTests(unittest.TestCase):
         self.assertEqual("tun0", outbound["bind_interface"])
         self.assertEqual({"server": "aimili-vpngate-dns", "strategy": "ipv4_only"}, outbound["domain_resolver"])
         self.assertEqual("aimili-vpngate", cfg["route"]["final"])
+        self.assertEqual({"server": "aimili-vpngate-dns", "strategy": "ipv4_only"}, cfg["route"]["default_domain_resolver"])
         server = cfg["dns"]["servers"][0]
         self.assertEqual("udp", server["type"])
         self.assertEqual("aimili-vpngate-dns", server["tag"])

@@ -252,7 +252,12 @@ def is_supported(deployment_mode: str) -> tuple[bool, str]:
 def existing_prefs(runner: CommandRunner) -> set[int]:
     rc, out = runner.run(["ip", "rule", "show"], timeout=5)
     if rc != 0:
-        return set()
+        # A transient failure here would make the caller believe nothing is applied
+        # and skip teardown, leaving the box fail-closed after the process exits.
+        rc, out = runner.run(["ip", "rule", "show"], timeout=5)
+        if rc != 0:
+            _log("WARNING", f"读取 ip rule 失败：{out}")
+            return set()
     prefs: set[int] = set()
     for line in out.splitlines():
         match = re.match(r"^\s*(\d+):", line)
@@ -274,7 +279,9 @@ def delete_pref(pref: int, runner: CommandRunner) -> None:
 
 def delete_all_prefs(runner: CommandRunner) -> None:
     present = existing_prefs(runner)
-    for pref in PREF_RANGE:
+    # Delete the catch-all (highest pref) first so exemption rules never vanish
+    # while "lookup 100" is still in place, which would blackhole live SSH replies.
+    for pref in reversed(PREF_RANGE):
         if pref in present:
             delete_pref(pref, runner)
 

@@ -3298,9 +3298,15 @@ def exit_reconcile_loop() -> None:
 def global_exit_teardown_for_restart() -> None:
     """Remove policy rules before the process exits; they are re-applied on startup."""
     try:
-        if global_exit.is_supported(DEPLOYMENT_MODE)[0] and global_exit.is_applied(exit_runner):
+        if not global_exit.is_supported(DEPLOYMENT_MODE)[0]:
+            return
+        applied = global_exit.is_applied(exit_runner)
+        flagged = bool(load_ui_config().get("global_exit_enabled"))
+        if applied or flagged:
             global_exit.disable(exit_runner)
-            print("[GlobalExit] 进程退出前已拆除全局出口规则", flush=True)
+            print(f"[GlobalExit] 进程退出前已拆除全局出口规则（规则存在={applied}，开关={flagged}）", flush=True)
+        else:
+            print("[GlobalExit] 进程退出前无全局出口规则需要拆除", flush=True)
     except Exception as exc:
         print(f"[GlobalExit] 退出前拆除全局出口规则失败: {exc}", flush=True)
 

@@ -67,7 +67,10 @@ def render_config(interface: str = "tun0", dns_server: str = "8.8.8.8") -> dict[
                 "domain_resolver": {"server": DNS_TAG, "strategy": "ipv4_only"},
             }
         ],
-        "route": {"final": OUTBOUND_TAG},
+        "route": {
+            "final": OUTBOUND_TAG,
+            "default_domain_resolver": {"server": DNS_TAG, "strategy": "ipv4_only"},
+        },
         "dns": {
             "servers": [
                 {

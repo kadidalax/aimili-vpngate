@@ -160,6 +160,22 @@ class GlobalExitTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             global_exit.enable(make_context(interface=""), FakeRunner())
 
+    def test_existing_prefs_retries_transient_show_failure(self) -> None:
+        runner = FakeRunner()
+        global_exit.enable(make_context(), runner)
+        calls = {"n": 0}
+        original = runner.run
+
+        def flaky(args, timeout=15):
+            if list(args)[:3] == ["ip", "rule", "show"] and calls["n"] == 0:
+                calls["n"] += 1
+                return 127, "Interrupted system call"
+            return original(args, timeout)
+
+        runner.run = flaky
+        self.assertIn(30031, global_exit.existing_prefs(runner))
+        self.assertTrue(global_exit.is_applied(runner))
+
     def test_disable_removes_everything_from_state(self) -> None:
         runner = FakeRunner()
         global_exit.enable(make_context(), runner)
@@ -173,6 +189,9 @@ class GlobalExitTests(unittest.TestCase):
         self.assertFalse(global_exit.state_file().exists())
         # prefs that were never added are not attempted
         self.assertNotIn("ip rule del pref 30039", runner.commands("ip rule del"))
+        # catch-all 30031 goes first so exemptions never disappear while "lookup 100" remains
+        deletes = runner.commands("ip rule del pref")
+        self.assertLess(deletes.index("ip rule del pref 30031"), deletes.index("ip rule del pref 30000"))
 
     def test_reconcile_reapplies_when_ips_change(self) -> None:
         runner = FakeRunner()
