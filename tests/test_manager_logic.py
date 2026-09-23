@@ -838,8 +838,8 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual(519, entries[-1]["index"])
 
     def test_web_update_controls_only_expose_stable_main_channel(self) -> None:
-        self.assertEqual("2.1.5", manager.APP_VERSION)
-        self.assertEqual("V2.1.5 正式版", manager.APP_VERSION_LABEL)
+        self.assertEqual("2.2.0", manager.APP_VERSION)
+        self.assertEqual("V2.2.0 正式版", manager.APP_VERSION_LABEL)
         self.assertIn("检测更新", manager.INDEX_HTML)
         self.assertIn("/api/check_update", manager.INDEX_HTML)
         self.assertIn("/tree/main", manager.INDEX_HTML)
@@ -856,6 +856,8 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertNotIn("CURRENT_BRANCH", install_text)
         self.assertNotIn("origin/master", install_text)
         self.assertNotIn("bate", install_text.lower())
+        self.assertIn('DEFAULT_USER="kadidalax"', install_text)
+        self.assertNotIn("baoweise-bot", install_text)
 
     def test_installer_uses_secure_credentials_and_current_version(self) -> None:
         install_text = (manager.ROOT_DIR / "install.sh").read_text(encoding="utf-8")
@@ -884,14 +886,14 @@ class ManagerLogicTests(unittest.TestCase):
     def test_release_workflow_uses_full_patch_version(self) -> None:
         workflow_text = (manager.ROOT_DIR / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
-        self.assertIn("default: v2.1.5", workflow_text)
+        self.assertIn("default: v2.2.0", workflow_text)
         self.assertIn("AimiliVPN V$(tr -d '\\r\\n' < VERSION) 正式版", workflow_text)
         self.assertNotIn("cut -d. -f1,2 VERSION", workflow_text)
 
     def test_latest_release_check_ignores_non_version_name_text(self) -> None:
         release = {
-            "tag_name": "v2.2.0",
-            "name": "AimiliVPN V2.2 正式版",
+            "tag_name": "v2.3.0",
+            "name": "AimiliVPN V2.3 正式版",
             "published_at": "2026-09-01T00:00:00Z",
             "draft": False,
             "prerelease": False,
@@ -901,18 +903,18 @@ class ManagerLogicTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["update_available"])
-        self.assertEqual("2.2.0", result["latest_version"])
-        self.assertEqual("v2.2.0", result["latest_tag"])
+        self.assertEqual("2.3.0", result["latest_version"])
+        self.assertEqual("v2.3.0", result["latest_tag"])
         self.assertEqual(
-            "https://github.com/baoweise-bot/aimili-vpngate/releases/tag/v2.2.0",
+            "https://github.com/kadidalax/aimili-vpngate/releases/tag/v2.3.0",
             result["release_url"],
         )
         fetch_mock.assert_called_once_with(manager.GITHUB_LATEST_RELEASE_API, True)
 
     def test_latest_release_check_reports_current_formal_version(self) -> None:
         release = {
-            "tag_name": "v2.1.5",
-            "name": "AimiliVPN V2.1.5 正式版",
+            "tag_name": "v2.2.0",
+            "name": "AimiliVPN V2.2.0 正式版",
             "draft": False,
             "prerelease": False,
         }
@@ -920,10 +922,10 @@ class ManagerLogicTests(unittest.TestCase):
             result = manager.check_latest_release()
 
         self.assertFalse(result["update_available"])
-        self.assertEqual("V2.1.5 正式版", result["current_version_label"])
+        self.assertEqual("V2.2.0 正式版", result["current_version_label"])
 
     def test_latest_release_check_reports_source_update_command(self) -> None:
-        release = {"tag_name": "v2.2.0", "draft": False, "prerelease": False}
+        release = {"tag_name": "v2.3.0", "draft": False, "prerelease": False}
         with (
             mock.patch.object(manager, "fetch_api_text", return_value=json.dumps(release)),
             mock.patch.object(manager, "DEPLOYMENT_MODE", "source"),
@@ -936,7 +938,7 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual("ml update", result["update_command"])
 
     def test_latest_release_check_reports_docker_update_command(self) -> None:
-        release = {"tag_name": "v2.2.0", "draft": False, "prerelease": False}
+        release = {"tag_name": "v2.3.0", "draft": False, "prerelease": False}
         with (
             mock.patch.object(manager, "fetch_api_text", return_value=json.dumps(release)),
             mock.patch.object(manager, "DEPLOYMENT_MODE", "docker"),

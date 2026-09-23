@@ -6,7 +6,7 @@ ARG BUILD_VERSION=dev
 
 LABEL org.opencontainers.image.title="AimiliVPN" \
       org.opencontainers.image.description="VPNGate node manager with HTTP and SOCKS5 proxy" \
-      org.opencontainers.image.source="https://github.com/baoweise-bot/aimili-vpngate" \
+      org.opencontainers.image.source="https://github.com/kadidalax/aimili-vpngate" \
       org.opencontainers.image.version="${BUILD_VERSION}"
 
 RUN apt-get update \

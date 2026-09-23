@@ -1,6 +1,6 @@
 services:
   aimilivpn:
-    image: ghcr.io/baoweise-bot/aimili-vpngate:2.1
+    image: ghcr.io/kadidalax/aimili-vpngate:2.2
     build:
       context: .
       args:

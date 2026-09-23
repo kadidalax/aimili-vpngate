@@ -58,7 +58,7 @@ AimiliVPN_Analysis_ZH.md
 scratch/
 _site/
 *连接配置*
-test_*.py
+/test_*.py
 *.bak
 *.orig
 
