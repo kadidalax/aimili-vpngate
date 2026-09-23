@@ -1358,6 +1358,7 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> 
     else:
         command.extend(["--ncp-ciphers", "AES-128-CBC:AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"])
 
+    command.extend(global_exit.openvpn_mark_args())
     command.extend(["--verb", "3"])
     
     if os.path.exists("/etc/ssl/certs"):
@@ -1523,6 +1524,8 @@ def run_openvpn_until_ready(
     dev: str = "tun0",
     cancel_event: threading.Event | None = None,
     track_pending: bool = False,
+    report_state: bool = True,
+    log_prefix: str = "[OpenVPN]",
 ) -> tuple[bool, str, subprocess.Popen[str] | None]:
     global pending_openvpn_process
     limit = timeout if timeout is not None else OPENVPN_TEST_TIMEOUT_SECONDS
@@ -1561,14 +1564,14 @@ def run_openvpn_until_ready(
                 lines.put(line_str)
             else:
                 if keep_alive:
-                    print(f"[OpenVPN] {line_str}", flush=True)
+                    print(f"{log_prefix} {line_str}", flush=True)
                     level = "INFO"
                     line_lower = line_str.lower()
                     if "error" in line_lower or "failed" in line_lower or "cannot" in line_lower or "fatal" in line_lower or "permission denied" in line_lower:
                         level = "ERROR"
                     elif "warning" in line_lower or "warn" in line_lower or "deprecated" in line_lower:
                         level = "WARNING"
-                    log_to_json(level, "VPN", f"[OpenVPN] {line_str}")
+                    log_to_json(level, "VPN", f"{log_prefix} {line_str}")
         if not startup_done[0]:
             lines.put(None)
 
@@ -1595,9 +1598,9 @@ def run_openvpn_until_ready(
             tail.append(line)
             tail = tail[-50:]
             if keep_alive:
-                print(f"[OpenVPN] {line}", flush=True)
+                print(f"{log_prefix} {line}", flush=True)
         lower = line.lower()
-        if keep_alive:
+        if keep_alive and report_state:
             update_handshake_status(lower)
         if "initialization sequence completed" in lower:
             if cancel_event is not None and cancel_event.is_set():
@@ -1624,7 +1627,7 @@ def run_openvpn_until_ready(
             level = "ERROR"
         elif "warning" in line_lower or "warn" in line_lower or "deprecated" in line_lower:
             level = "WARNING"
-        log_to_json(level, "VPN", f"[OpenVPN] {line_str}")
+        log_to_json(level, "VPN", f"{log_prefix} {line_str}")
 
     if not ok and not cancelled:
         err_code, diag_msg = vpn_utils.diagnose_openvpn_failure(tail)
@@ -1640,51 +1643,93 @@ def run_openvpn_until_ready(
     return ok, message, process
 
 
-def setup_policy_routing(interface: str = "tun0") -> bool:
+def _run_ip(args: list[str], timeout: float = 2) -> int:
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        return subprocess.run(args, capture_output=True, timeout=timeout).returncode
     except Exception:
-        pass
-    try:
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-    except Exception:
-        pass
-    
+        return 127
+
+def remove_policy_rules(interface: str, table: int) -> None:
+    """Delete every `oif <interface> lookup <table>` rule (exact match, no table-wide wildcard)."""
+    table_str = str(table)
+    for _ in range(20):
+        if _run_ip(["ip", "rule", "del", "oif", interface, "table", table_str]) != 0:
+            break
+
+def remove_policy_routes(interface: str, table: int) -> None:
+    """Table 100 keeps the global-exit fallback route, so only its tun0 default is removed.
+    Speed-test tables (101+) are fully owned by us and get flushed."""
+    table_str = str(table)
+    if table == 100:
+        _run_ip(["ip", "route", "del", "default", "dev", interface, "table", table_str])
+    else:
+        _run_ip(["ip", "route", "flush", "table", table_str])
+
+def setup_policy_routing(interface: str = "tun0", table: int = 100) -> bool:
+    table_str = str(table)
+    remove_policy_rules(interface, table)
+    remove_policy_routes(interface, table)
+
     success = False
     for attempt in range(1, 4):
         try:
-            subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
-            subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
+            subprocess.run(["ip", "route", "replace", "default", "dev", interface, "table", table_str], check=True, timeout=2)
+            subprocess.run(["ip", "rule", "add", "oif", interface, "table", table_str], check=True, timeout=2)
             # 配置反向路径过滤 rp_filter 为 loose 模式 (2)，防止回包被内核静默丢弃
             for proc_path in ["all", "default", interface]:
                 try:
                     subprocess.run(["sysctl", "-w", f"net.ipv4.conf.{proc_path}.rp_filter=2"], capture_output=True, timeout=2)
                 except Exception:
                     pass
-            print(f"[policy_routing] Enabled policy routing for interface {interface} (attempt {attempt} success)", flush=True)
+            print(f"[policy_routing] Enabled policy routing for interface {interface} table {table_str} (attempt {attempt} success)", flush=True)
             success = True
             break
         except Exception as e:
             print(f"[policy_routing] Attempt {attempt} failed to enable policy routing: {e}", flush=True)
             time.sleep(1)
-            
+
     if not success:
         print("[路由配置失败] [错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由，这可能会导致通过 VPN 接口的出站路由无法正常解析。请检查系统是否支持策略路由、iproute2 工具是否完整，以及是否具有 root 权限。", flush=True)
-        log_to_json("ERROR", "Routing", "[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由")
+        log_to_json("ERROR", "Routing", f"[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 {table_str} 添加默认路由")
+    elif table == 100:
+        try:
+            if load_ui_config().get("global_exit_enabled"):
+                global_exit.ensure_table_fallback(exit_runner)
+        except Exception as exc:
+            log_to_json("WARNING", "GlobalExit", f"确认表 100 兜底路由失败: {exc}")
     return success
 
-def cleanup_policy_routing() -> None:
+def cleanup_policy_routing(interface: str = "tun0", table: int = 100) -> None:
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-        print("[policy_routing] Cleared policy routing table 100", flush=True)
+        remove_policy_rules(interface, table)
+        remove_policy_routes(interface, table)
+        print(f"[policy_routing] Cleared policy routing for {interface} table {table}", flush=True)
     except Exception:
         pass
+
+def cleanup_stale_speedtest_routes() -> None:
+    """Remove leftover `oif tunN lookup 1xx` rules and tables from interrupted speed tests."""
+    try:
+        result = subprocess.run(["ip", "rule", "show"], capture_output=True, text=True, timeout=3)
+    except Exception:
+        return
+    if result.returncode != 0:
+        return
+    for line in result.stdout.splitlines():
+        match = re.search(r"\boif\s+(tun\d+)\s+lookup\s+(1\d\d)\b", line)
+        if not match:
+            continue
+        dev, table = match.group(1), int(match.group(2))
+        if dev == "tun0" or not 101 <= table <= 199:
+            continue
+        print(f"[policy_routing] Removing stale speed-test routing for {dev} table {table}", flush=True)
+        remove_policy_rules(dev, table)
+        remove_policy_routes(dev, table)
 
 def stop_active_openvpn() -> None:
     global active_openvpn_process, active_openvpn_node_id
     with lock:
-        cleanup_policy_routing()
+        cleanup_policy_routing("tun0", 100)
         config_to_delete = None
         if active_openvpn_node_id:
             nodes = read_nodes()
@@ -2052,7 +2097,12 @@ def is_systemic_probe_failure(message: Any) -> bool:
         )
     )
 
-def test_multiple_nodes(node_ids: list[str], target_available: int | None = None) -> list[dict[str, Any]]:
+def test_multiple_nodes(
+    node_ids: list[str],
+    target_available: int | None = None,
+    cancel_event: threading.Event | None = None,
+    progress_cb: Any = None,
+) -> list[dict[str, Any]]:
     with lock:
         nodes = read_nodes()
         to_test = [n for n in nodes if n.get("id") in node_ids]
@@ -2083,7 +2133,7 @@ def test_multiple_nodes(node_ids: list[str], target_available: int | None = None
         try:
             tun_idx = get_free_test_index()
             dev_name = f"tun{tun_idx}"
-            ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
+            ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=dev_name, cancel_event=cancel_event)
         finally:
             if tun_idx is not None:
                 release_test_index(tun_idx)
@@ -2112,6 +2162,8 @@ def test_multiple_nodes(node_ids: list[str], target_available: int | None = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for batch_start in range(0, len(to_test), max_workers):
             if systemic_failure or (target_available is not None and available_count >= target_available):
+                break
+            if cancel_event is not None and cancel_event.is_set():
                 break
 
             batch = to_test[batch_start : batch_start + max_workers]
@@ -2153,6 +2205,11 @@ def test_multiple_nodes(node_ids: list[str], target_available: int | None = None
                             current.update(result)
                             break
                     write_json(NODES_FILE, sort_all_nodes(current_nodes))
+                if progress_cb is not None:
+                    try:
+                        progress_cb(len(updated_nodes_map), len(to_test))
+                    except Exception:
+                        pass
 
             if systemic_failure:
                 message = f"检测到系统级 OpenVPN 故障，已停止剩余节点探测: {systemic_failure}"
@@ -7359,6 +7416,7 @@ class Tee:
 def main() -> None:
     ensure_dirs()
     kill_existing_openvpn_processes()
+    cleanup_stale_speedtest_routes()
     
     log_file = DATA_DIR / "vpngate.log"
     tee = Tee(str(log_file))

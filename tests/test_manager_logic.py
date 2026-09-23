@@ -534,6 +534,252 @@ class ManagerLogicTests(unittest.TestCase):
             self.assertNotIn(key, persisted)
         self.assertEqual(123, manager.get_state()["next_check_at"])
 
+    def _record_ip_commands(self, rc_for=None):
+        """Return (patcher, calls) where calls collects subprocess.run argv lists."""
+        calls: list[list[str]] = []
+        rule_del_seen = {"count": 0}
+
+        def fake_run(args, *a, **kw):
+            argv = list(args)
+            calls.append(argv)
+            rc = 0
+            if argv[:3] == ["ip", "rule", "del"]:
+                rule_del_seen["count"] += 1
+                rc = 0 if rule_del_seen["count"] % 2 == 1 else 2
+            if rc_for is not None:
+                rc = rc_for(argv, rc)
+            if kw.get("check") and rc != 0:
+                raise subprocess.CalledProcessError(rc, argv)
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+
+        return mock.patch.object(manager.subprocess, "run", side_effect=fake_run), calls
+
+    def test_cleanup_policy_routing_only_removes_tun0_route_from_table_100(self) -> None:
+        patcher, calls = self._record_ip_commands()
+        with patcher:
+            manager.cleanup_policy_routing("tun0", 100)
+        joined = [" ".join(c) for c in calls]
+        self.assertIn("ip rule del oif tun0 table 100", joined)
+        self.assertIn("ip route del default dev tun0 table 100", joined)
+        self.assertFalse(any("flush" in c for c in joined))
+        self.assertFalse(any(c == "ip rule del table 100" for c in joined))
+
+        patcher, calls = self._record_ip_commands()
+        with patcher:
+            manager.cleanup_policy_routing("tun5", 105)
+        joined = [" ".join(c) for c in calls]
+        self.assertIn("ip rule del oif tun5 table 105", joined)
+        self.assertIn("ip route flush table 105", joined)
+
+    def test_setup_policy_routing_uses_table_argument_and_fallback_hook(self) -> None:
+        manager.update_ui_config(global_exit_enabled=True)
+        patcher, calls = self._record_ip_commands()
+        with patcher, mock.patch.object(manager.global_exit, "ensure_table_fallback") as fallback:
+            self.assertTrue(manager.setup_policy_routing("tun5", 105))
+            fallback.assert_not_called()
+            calls.clear()
+            self.assertTrue(manager.setup_policy_routing("tun0", 100))
+            fallback.assert_called_once_with(manager.exit_runner)
+        joined = [" ".join(c) for c in calls]
+        self.assertIn("ip route replace default dev tun0 table 100", joined)
+        self.assertIn("ip rule add oif tun0 table 100", joined)
+
+        manager.update_ui_config(global_exit_enabled=False)
+        patcher, calls = self._record_ip_commands()
+        with patcher, mock.patch.object(manager.global_exit, "ensure_table_fallback") as fallback:
+            self.assertTrue(manager.setup_policy_routing("tun0", 100))
+            fallback.assert_not_called()
+
+        def fail_route(argv, rc):
+            return 2 if argv[:3] == ["ip", "route", "replace"] else rc
+
+        patcher, calls = self._record_ip_commands(rc_for=fail_route)
+        with patcher, mock.patch.object(manager.time, "sleep"):
+            self.assertFalse(manager.setup_policy_routing("tun5", 105))
+
+    def test_openvpn_command_includes_mark_on_linux(self) -> None:
+        with (
+            mock.patch.object(manager.global_exit, "openvpn_mark_args", return_value=["--mark", "26"]),
+            mock.patch.object(manager, "get_openvpn_version", return_value=2.6),
+        ):
+            command = manager.openvpn_command("missing.ovpn", route_nopull=True, dev="tun7")
+        self.assertIn("--mark", command)
+        self.assertEqual("26", command[command.index("--mark") + 1])
+        self.assertLess(command.index("--mark"), command.index("--verb"))
+        self.assertEqual("tun7", command[command.index("--dev") + 1])
+        self.assertEqual("--route-nopull", command[-1])
+
+        with (
+            mock.patch.object(manager.global_exit, "openvpn_mark_args", return_value=[]),
+            mock.patch.object(manager, "get_openvpn_version", return_value=2.6),
+        ):
+            command = manager.openvpn_command("missing.ovpn", route_nopull=False)
+        self.assertNotIn("--mark", command)
+
+    def test_run_openvpn_report_state_false_does_not_touch_state(self) -> None:
+        class FakePopen:
+            def __init__(self, *args, **kwargs):
+                self.stdout = iter(
+                    [
+                        "Mon PUSH: Received control message: 'PUSH_REPLY,route 10.0.0.0'\n",
+                        "Mon TUN/TAP device tun5 opened\n",
+                        "Mon Initialization Sequence Completed\n",
+                    ]
+                )
+                self.running = True
+
+            def poll(self):
+                return None if self.running else 0
+
+            def terminate(self):
+                self.running = False
+
+            def wait(self, timeout=None):
+                self.running = False
+                return 0
+
+            def kill(self):
+                self.running = False
+
+        with (
+            mock.patch.object(manager.subprocess, "Popen", FakePopen),
+            mock.patch.object(manager, "openvpn_command", return_value=["openvpn"]),
+            mock.patch.object(manager, "set_state") as set_state,
+            mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as out,
+        ):
+            ok, message, process = manager.run_openvpn_until_ready(
+                "x.ovpn", keep_alive=True, route_nopull=True, timeout=5, dev="tun5",
+                report_state=False, log_prefix="[SpeedTest tun5]",
+            )
+        self.assertTrue(ok, message)
+        self.assertIsNotNone(process)
+        set_state.assert_not_called()
+        self.assertIn("[SpeedTest tun5]", out.getvalue())
+        self.assertNotIn("[OpenVPN]", out.getvalue())
+
+        with (
+            mock.patch.object(manager.subprocess, "Popen", FakePopen),
+            mock.patch.object(manager, "openvpn_command", return_value=["openvpn"]),
+            mock.patch.object(manager, "set_state") as set_state,
+            mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()),
+        ):
+            ok, _message, _process = manager.run_openvpn_until_ready("x.ovpn", keep_alive=True, route_nopull=True, timeout=5)
+        self.assertTrue(ok)
+        self.assertTrue(set_state.called)
+
+    def test_multiple_nodes_honours_cancel_event_and_progress(self) -> None:
+        nodes = self.write_nodes(12)
+        cancel = threading.Event()
+        calls = []
+        progress = []
+
+        def fake_openvpn(config_file, **kwargs):
+            calls.append(config_file)
+            self.assertIs(cancel, kwargs.get("cancel_event"))
+            cancel.set()
+            return True, "ready", None
+
+        with (
+            mock.patch.object(manager.vpn_utils, "ping_latency_ms", return_value=10),
+            mock.patch.object(manager.vpn_utils, "enrich_ip_info"),
+            mock.patch.object(manager, "run_openvpn_until_ready", side_effect=fake_openvpn),
+            mock.patch.object(manager, "NODE_PROBE_WORKERS", 4),
+        ):
+            results = manager.test_multiple_nodes(
+                [node["id"] for node in nodes],
+                target_available=None,
+                cancel_event=cancel,
+                progress_cb=lambda done, total: progress.append((done, total)),
+            )
+
+        self.assertEqual(4, len(calls))
+        self.assertEqual(4, len(results))
+        self.assertEqual([(1, 12), (2, 12), (3, 12), (4, 12)], progress)
+
+    def test_multiple_nodes_without_target_probes_everything(self) -> None:
+        nodes = self.write_nodes(12)
+        calls = []
+
+        with (
+            mock.patch.object(manager.vpn_utils, "ping_latency_ms", return_value=10),
+            mock.patch.object(manager.vpn_utils, "enrich_ip_info"),
+            mock.patch.object(manager, "run_openvpn_until_ready", side_effect=lambda cf, **kw: (calls.append(cf) or (True, "ready", None))),
+            mock.patch.object(manager, "NODE_PROBE_WORKERS", 5),
+        ):
+            results = manager.test_multiple_nodes([node["id"] for node in nodes], target_available=None)
+        self.assertEqual(12, len(calls))
+        self.assertEqual(12, len(results))
+
+    def test_stale_speedtest_routes_cleanup_parses_rules(self) -> None:
+        rules = (
+            "0:\tfrom all lookup local\n"
+            "32765:\tfrom all oif tun0 lookup 100\n"
+            "32764:\tfrom all oif tun5 lookup 105\n"
+            "32763:\tfrom all oif tun7 lookup 107\n"
+            "32762:\tfrom all oif tun9 lookup 250\n"
+            "32766:\tfrom all lookup main\n"
+        )
+
+        def rc_for(argv, rc):
+            return rc
+
+        calls: list[list[str]] = []
+        del_count = {"n": 0}
+
+        def fake_run(args, *a, **kw):
+            argv = list(args)
+            calls.append(argv)
+            if argv == ["ip", "rule", "show"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=rules, stderr="")
+            if argv[:3] == ["ip", "rule", "del"]:
+                del_count["n"] += 1
+                return subprocess.CompletedProcess(argv, 0 if del_count["n"] % 2 else 2, stdout="", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with mock.patch.object(manager.subprocess, "run", side_effect=fake_run):
+            manager.cleanup_stale_speedtest_routes()
+        joined = [" ".join(c) for c in calls]
+        self.assertIn("ip rule del oif tun5 table 105", joined)
+        self.assertIn("ip route flush table 105", joined)
+        self.assertIn("ip rule del oif tun7 table 107", joined)
+        self.assertIn("ip route flush table 107", joined)
+        self.assertFalse(any("tun0" in c for c in joined))
+        self.assertFalse(any("250" in c for c in joined))
+
+    def test_dns_query_over_device_binds_requested_device(self) -> None:
+        class FakeSock:
+            def __init__(self, *args, **kwargs):
+                self.options = []
+
+            def settimeout(self, value):
+                pass
+
+            def setsockopt(self, level, option, value):
+                self.options.append((level, option, value))
+
+            def sendto(self, packet, address):
+                raise OSError("stop here")
+
+            def close(self):
+                pass
+
+        created = []
+
+        def factory(*args, **kwargs):
+            sock = FakeSock()
+            created.append(sock)
+            return sock
+
+        with (
+            mock.patch.object(proxy_server.socket, "socket", side_effect=factory),
+            mock.patch.object(proxy_server.socket, "SO_BINDTODEVICE", 25, create=True),
+        ):
+            self.assertIsNone(proxy_server.dns_query_over_device("example.com", 1, "8.8.8.8", 1.0, dev="tun9"))
+            self.assertIsNone(proxy_server.dns_query_over_tun0("example.com", 1, "8.8.8.8", 1.0))
+            self.assertEqual("1.2.3.4", proxy_server.resolve_dns_over_device("1.2.3.4", "tun9"))
+        self.assertEqual((proxy_server.socket.SOL_SOCKET, 25, b"tun9"), created[0].options[0])
+        self.assertEqual((proxy_server.socket.SOL_SOCKET, 25, b"tun0"), created[1].options[0])
+
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
         manager.write_json(auth_file, {"username": "test", "password": "secret"})
