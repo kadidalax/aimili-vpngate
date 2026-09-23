@@ -3155,7 +3155,8 @@ def collector_loop() -> None:
         try:
             print("[守护线程] 开始执行节点拉取与可用性检测周期任务...", flush=True)
             log_to_json("INFO", "Main", "开始执行节点拉取与可用性检测周期任务...")
-            res = maintain_valid_nodes(force=False)
+            with_speedtest = bool(speedtest.normalize_settings(load_ui_config().get("speedtest")).get("auto_after_check"))
+            res = run_pipeline("periodic", with_speedtest=with_speedtest)
             if "没有拉取到新节点" not in res:
                 success = True
             log_to_json("INFO", "Main", f"周期同步与检测任务完成，结果: {res}")
@@ -3164,13 +3165,23 @@ def collector_loop() -> None:
             print(f"[错误] {err_msg}", flush=True)
             log_to_json("ERROR", "Main", err_msg)
             set_state(last_check_at=time.time(), last_check_message=f"check error: {exc}")
-            
+
         if not active_openvpn_running() and not success:
-            sleep_time = 30
-        else:
-            sleep_time = CHECK_INTERVAL_SECONDS
-            
-        time.sleep(sleep_time)
+            # Retry shortly when nothing was fetched and no tunnel is up.
+            schedule_next_check(time.time() - check_interval_seconds() + 30)
+
+        wait_for_next_check()
+
+def wait_for_next_check() -> None:
+    """Sleep until state.next_check_at; settings changes wake us up to recompute."""
+    global last_collector_heartbeat
+    while True:
+        collector_wakeup.clear()
+        remaining = float(get_state().get("next_check_at") or 0) - time.time()
+        if remaining <= 0:
+            return
+        collector_wakeup.wait(min(remaining, 3600))
+        last_collector_heartbeat = time.time()
 
 LOGIN_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -7228,7 +7239,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             now = time.time()
             server_uptime = now - server_start_time
-            collector_ok = (last_collector_heartbeat > 0.0 and now - last_collector_heartbeat < (CHECK_INTERVAL_SECONDS * 1.5)) or (server_uptime < 15.0)
+            collector_ok = (last_collector_heartbeat > 0.0 and now - last_collector_heartbeat < max(check_interval_seconds() * 1.5, 5400)) or (server_uptime < 15.0)
             collector_status = {
                 "name": "节点同步守护线程",
                 "status": "running" if collector_ok else "stopped",

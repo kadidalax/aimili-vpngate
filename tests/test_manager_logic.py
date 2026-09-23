@@ -1145,6 +1145,83 @@ class ManagerLogicTests(unittest.TestCase):
             manager.auto_switch_node()
         connect.assert_called_once_with("node-0")
 
+    def test_schedule_next_check_uses_interval_and_wakes_collector(self) -> None:
+        manager.update_ui_config(check_interval_hours=2)
+        manager.collector_wakeup.clear()
+        next_at = manager.schedule_next_check(1000.0)
+        self.assertEqual(1000.0 + 7200, next_at)
+        self.assertEqual(next_at, manager.get_state()["next_check_at"])
+        self.assertTrue(manager.collector_wakeup.is_set())
+        manager.collector_wakeup.clear()
+
+        manager.last_pipeline_end = 500.0
+        self.assertEqual(500.0 + 7200, manager.reschedule_after_interval_change())
+        manager.last_pipeline_end = 0.0
+        with mock.patch.object(manager.time, "time", return_value=42.0):
+            self.assertEqual(42.0 + 7200, manager.reschedule_after_interval_change())
+        manager.collector_wakeup.clear()
+
+    def test_interval_change_reschedules_from_last_end_without_running(self) -> None:
+        manager.update_ui_config(check_interval_hours=2)
+        manager.last_pipeline_end = 1000.0
+        manager.schedule_next_check(1000.0)
+        clock = {"now": 1500.0}
+        waits = []
+
+        def fake_wait(timeout=None):
+            waits.append(timeout)
+            if len(waits) == 1:
+                # A settings change shrinks the interval to one hour: still not due.
+                manager.update_ui_config(check_interval_hours=1)
+                manager.reschedule_after_interval_change()
+                clock["now"] = 2000.0
+                return True
+            if len(waits) == 2:
+                clock["now"] = 1000.0 + 3600 + 1
+                return False
+            raise AssertionError("waited too often")
+
+        with (
+            mock.patch.object(manager.time, "time", side_effect=lambda: clock["now"]),
+            mock.patch.object(manager.collector_wakeup, "wait", side_effect=fake_wait),
+        ):
+            manager.wait_for_next_check()
+
+        self.assertEqual(2, len(waits))
+        self.assertEqual(3600, waits[0])  # min(remaining 6700, 3600)
+        self.assertAlmostEqual(1000.0 + 3600 - 2000.0, waits[1])
+        self.assertEqual(1000.0 + 3600, manager.get_state()["next_check_at"])
+
+    def test_collector_loop_runs_pipeline_with_auto_speedtest_setting(self) -> None:
+        manager.update_ui_config(speedtest={"auto_after_check": True})
+        calls = []
+
+        def fake_pipeline(trigger, with_speedtest):
+            calls.append((trigger, with_speedtest))
+            return "Fetched 3 nodes."
+
+        with (
+            mock.patch.object(manager, "run_pipeline", side_effect=fake_pipeline),
+            mock.patch.object(manager, "wait_for_next_check", side_effect=KeyboardInterrupt),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                manager.collector_loop()
+        self.assertEqual([("periodic", True)], calls)
+
+        manager.update_ui_config(speedtest={"auto_after_check": False})
+        manager.active_openvpn_process = None
+        with (
+            mock.patch.object(manager, "run_pipeline", return_value="没有拉取到新节点"),
+            mock.patch.object(manager, "wait_for_next_check", side_effect=KeyboardInterrupt),
+            mock.patch.object(manager, "schedule_next_check") as schedule,
+            mock.patch.object(manager, "log_to_json"),
+            mock.patch.object(manager.time, "time", return_value=10000.0),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                manager.collector_loop()
+        schedule.assert_called_once_with(10000.0 - manager.check_interval_seconds() + 30)
+
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
         manager.write_json(auth_file, {"username": "test", "password": "secret"})
