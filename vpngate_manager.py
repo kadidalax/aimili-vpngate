@@ -4592,6 +4592,45 @@ INDEX_HTML = r"""<!doctype html>
       background: rgba(244, 63, 94, 0.08);
     }
     
+    /* Themed scrollbars */
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(129, 140, 248, 0.35) transparent;
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(129, 140, 248, 0.28);
+      border-radius: 8px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(129, 140, 248, 0.5); background-clip: padding-box; }
+    ::-webkit-scrollbar-corner { background: transparent; }
+
+    /* Hide native number spinners; themed steppers are added by JS */
+    input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .num-stepper { position: relative; display: block; }
+    .num-stepper > input { padding-right: 34px; width: 100%; box-sizing: border-box; }
+    .num-stepper-btns {
+      position: absolute; top: 4px; right: 4px; bottom: 4px; width: 24px;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .num-stepper-btns button {
+      flex: 1; border: none; padding: 0; cursor: pointer; border-radius: 4px;
+      background: rgba(255, 255, 255, 0.05); color: var(--text-secondary);
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s;
+    }
+    .num-stepper-btns button:hover { background: rgba(99, 102, 241, 0.3); color: #fff; }
+    .num-stepper-btns svg { width: 10px; height: 10px; }
+
+    @media (max-width: 720px) {
+      .speedtest-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
     /* Modal styles */
     .modal {
       display: none;
@@ -4753,7 +4792,7 @@ INDEX_HTML = r"""<!doctype html>
 
     .speedtest-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px 16px;
     }
 
@@ -5114,7 +5153,7 @@ INDEX_HTML = r"""<!doctype html>
 
   <!-- Network Modal (代理及网络设置，包括出站路由) -->
   <div id="network_modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="network_modal_title" aria-hidden="true">
-    <div class="modal-content" tabindex="-1" style="max-width: 480px;">
+    <div class="modal-content" tabindex="-1" style="max-width: 640px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
         <h3 id="network_modal_title" style="margin: 0; font-size: 18px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:20px; height:20px; color: var(--primary);" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
@@ -5220,7 +5259,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
   <div id="speedtest_modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="speedtest_modal_title" aria-hidden="true">
-    <div class="modal-content" tabindex="-1" style="max-width: 560px;">
+    <div class="modal-content" tabindex="-1" style="max-width: 820px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
         <h3 id="speedtest_modal_title" style="margin: 0; font-size: 18px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:20px; height:20px; color: var(--primary);" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
@@ -7510,6 +7549,36 @@ function exportLogContent() {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+function enhanceNumberInputs(root) {
+  const up = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>';
+  const down = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>';
+  (root || document).querySelectorAll('input[type="number"]').forEach(input => {
+    if (input.parentElement && input.parentElement.classList.contains("num-stepper")) return;
+    const wrap = document.createElement("span");
+    wrap.className = "num-stepper";
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    const btns = document.createElement("span");
+    btns.className = "num-stepper-btns";
+    [["stepUp", up, "增加"], ["stepDown", down, "减少"]].forEach(([method, icon, label]) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.tabIndex = -1;
+      btn.setAttribute("aria-label", label);
+      btn.innerHTML = icon;
+      btn.addEventListener("click", () => {
+        if (input.disabled || input.readOnly) return;
+        if (input.value === "" && input.placeholder) input.value = input.placeholder;
+        else input[method]();
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      btns.appendChild(btn);
+    });
+    wrap.appendChild(btns);
+  });
+}
+enhanceNumberInputs();
 </script>
 </body></html>"""
 
