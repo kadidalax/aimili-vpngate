@@ -4,8 +4,8 @@
 
 **A VPNGate node manager and HTTP / HTTPS / SOCKS5 proxy gateway for Linux VPS hosts**
 
-[![Release](https://img.shields.io/github/v/release/baoweise-bot/aimili-vpngate?style=flat-square&label=stable&color=16a34a)](https://github.com/baoweise-bot/aimili-vpngate/releases/latest)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/baoweise-bot/aimili-vpngate/pkgs/container/aimili-vpngate)
+[![Release](https://img.shields.io/github/v/release/kadidalax/aimili-vpngate?style=flat-square&label=stable&color=16a34a)](https://github.com/kadidalax/aimili-vpngate/releases/latest)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/kadidalax/aimili-vpngate/pkgs/container/aimili-vpngate)
 [![License](https://img.shields.io/badge/License-GPL--3.0-334155?style=flat-square)](../LICENSE)
 
 [简体中文](../README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md)
@@ -37,7 +37,7 @@ AimiliVPN uses Python's standard library to manage VPNGate nodes. It provides no
 Run as `root` on a supported Linux VPS:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 The installer prints the complete Web URL, private path, username, and password. Run `ml` to open the management menu.
@@ -70,7 +70,7 @@ Before purchasing, confirm that the selected plan permits TUN/TAP, OpenVPN, and 
 ### Option 1: Source installer
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 The installer deploys to `/opt/aimilivpn` and registers a system service.
@@ -78,7 +78,7 @@ The installer deploys to `/opt/aimilivpn` and registers a system service.
 For unattended installation, explicitly skip the first-run prompts and generate the Web path and credentials automatically:
 
 ```bash
-AIMILIVPN_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+AIMILIVPN_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 ```bash
@@ -94,26 +94,29 @@ ml uninstall       # Uninstall
 To inspect the installer first:
 
 ```bash
-git clone --branch main --single-branch https://github.com/baoweise-bot/aimili-vpngate.git
+git clone --branch main --single-branch https://github.com/kadidalax/aimili-vpngate.git
 cd aimili-vpngate
 sudo bash install.sh
 ```
 
-Universal Linux source archives and SHA-256 checksums are available from [GitHub Releases](https://github.com/baoweise-bot/aimili-vpngate/releases/latest). Version changes are documented in the Release Notes.
+Universal Linux source archives and SHA-256 checksums are available from [GitHub Releases](https://github.com/kadidalax/aimili-vpngate/releases/latest). Version changes are documented in the Release Notes.
 
 ### Option 2: Docker Compose
 
 The Docker host must provide `/dev/net/tun`, host networking, `NET_ADMIN`, and `NET_RAW`.
 
 ```bash
-git clone --branch main --single-branch https://github.com/baoweise-bot/aimili-vpngate.git
+git clone --branch main --single-branch https://github.com/kadidalax/aimili-vpngate.git
 cd aimili-vpngate
 docker compose pull
 docker compose up -d
 docker logs -f aimilivpn
 ```
 
-Image: `ghcr.io/baoweise-bot/aimili-vpngate:2.1`
+Image: `ghcr.io/kadidalax/aimili-vpngate:2.2`
+
+> [!NOTE]
+> The image is published by the Release workflow when a `v*` tag is pushed; until then, use the local build below. Docker mode does not support sing-box exit takeover or global exit.
 
 Update:
 
@@ -138,7 +141,7 @@ docker run -d \
   -e LOCAL_PROXY_HOST=127.0.0.1 \
   -e LOCAL_PROXY_PORT=7928 \
   -v aimilivpn-data:/data \
-  ghcr.io/baoweise-bot/aimili-vpngate:2.1
+  ghcr.io/kadidalax/aimili-vpngate:2.2
 ```
 
 </details>
@@ -147,7 +150,7 @@ docker run -d \
 <summary><strong>Build locally when GHCR is unavailable</strong></summary>
 
 ```bash
-git clone --branch main --single-branch https://github.com/baoweise-bot/aimili-vpngate.git
+git clone --branch main --single-branch https://github.com/kadidalax/aimili-vpngate.git
 cd aimili-vpngate
 docker compose build
 docker compose up -d
@@ -224,7 +227,7 @@ After the tunnel is established:
 | Website / forum | Announcements and discussion | [339936.xyz](https://339936.xyz) |
 | Telegram group | Real-time community chat | [t.me/arestemple](https://t.me/arestemple) |
 | YouTube tutorial | Installation and usage video | [Watch](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
-| GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/baoweise-bot/aimili-vpngate/issues) |
+| GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/kadidalax/aimili-vpngate/issues) |
 | Email | Bug reports and contact | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
@@ -242,6 +245,6 @@ After the tunnel is established:
 
 <div align="center">
 
-[Stable Release](https://github.com/baoweise-bot/aimili-vpngate/releases/latest) · [Issues](https://github.com/baoweise-bot/aimili-vpngate/issues) · [GPL-3.0 License](../LICENSE)
+[Stable Release](https://github.com/kadidalax/aimili-vpngate/releases/latest) · [Issues](https://github.com/kadidalax/aimili-vpngate/issues) · [GPL-3.0 License](../LICENSE)
 
 </div>

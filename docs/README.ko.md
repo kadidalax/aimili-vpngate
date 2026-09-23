@@ -4,8 +4,8 @@
 
 **Linux VPS용 VPNGate 노드 관리 및 HTTP / HTTPS / SOCKS5 프록시 게이트웨이**
 
-[![Release](https://img.shields.io/github/v/release/baoweise-bot/aimili-vpngate?style=flat-square&label=stable&color=16a34a)](https://github.com/baoweise-bot/aimili-vpngate/releases/latest)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/baoweise-bot/aimili-vpngate/pkgs/container/aimili-vpngate)
+[![Release](https://img.shields.io/github/v/release/kadidalax/aimili-vpngate?style=flat-square&label=stable&color=16a34a)](https://github.com/kadidalax/aimili-vpngate/releases/latest)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/kadidalax/aimili-vpngate/pkgs/container/aimili-vpngate)
 [![License](https://img.shields.io/badge/License-GPL--3.0-334155?style=flat-square)](../LICENSE)
 
 [简体中文](../README.md) · [English](README.en.md) · [日本語](README.ja.md) · **한국어**
@@ -36,7 +36,7 @@ AimiliVPN은 Python 표준 라이브러리로 VPNGate 노드를 관리하며 노
 지원되는 Linux VPS에서 `root`로 실행합니다.
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 설치 후 Web 관리 화면의 전체 URL, 전용 경로, 사용자 이름과 비밀번호가 표시됩니다. `ml` 명령으로 관리 메뉴를 열 수 있습니다.
@@ -69,7 +69,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 ### 방법 1: 소스 설치 프로그램
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/install.sh)
 ```
 
 `/opt/aimilivpn`에 배포하고 시스템 서비스를 등록합니다.
@@ -87,26 +87,26 @@ ml uninstall       # 제거
 먼저 설치 프로그램을 검토하려면:
 
 ```bash
-git clone --branch main --single-branch https://github.com/baoweise-bot/aimili-vpngate.git
+git clone --branch main --single-branch https://github.com/kadidalax/aimili-vpngate.git
 cd aimili-vpngate
 sudo bash install.sh
 ```
 
-공통 Linux 소스 아카이브와 SHA-256 체크섬은 [GitHub Releases](https://github.com/baoweise-bot/aimili-vpngate/releases/latest)에서 받을 수 있습니다. 변경 사항은 Release Notes에 기록됩니다.
+공통 Linux 소스 아카이브와 SHA-256 체크섬은 [GitHub Releases](https://github.com/kadidalax/aimili-vpngate/releases/latest)에서 받을 수 있습니다. 변경 사항은 Release Notes에 기록됩니다.
 
 ### 방법 2: Docker Compose
 
 Docker 호스트는 `/dev/net/tun`, host 네트워크, `NET_ADMIN`, `NET_RAW`를 제공해야 합니다.
 
 ```bash
-git clone --branch main --single-branch https://github.com/baoweise-bot/aimili-vpngate.git
+git clone --branch main --single-branch https://github.com/kadidalax/aimili-vpngate.git
 cd aimili-vpngate
 docker compose pull
 docker compose up -d
 docker logs -f aimilivpn
 ```
 
-이미지: `ghcr.io/baoweise-bot/aimili-vpngate:2.1`
+이미지: `ghcr.io/kadidalax/aimili-vpngate:2.2`
 
 업데이트:
 
@@ -131,7 +131,7 @@ docker run -d \
   -e LOCAL_PROXY_HOST=127.0.0.1 \
   -e LOCAL_PROXY_PORT=7928 \
   -v aimilivpn-data:/data \
-  ghcr.io/baoweise-bot/aimili-vpngate:2.1
+  ghcr.io/kadidalax/aimili-vpngate:2.2
 ```
 
 </details>
@@ -140,7 +140,7 @@ docker run -d \
 <summary><strong>GHCR을 사용할 수 없을 때 로컬 빌드</strong></summary>
 
 ```bash
-git clone --branch main --single-branch https://github.com/baoweise-bot/aimili-vpngate.git
+git clone --branch main --single-branch https://github.com/kadidalax/aimili-vpngate.git
 cd aimili-vpngate
 docker compose build
 docker compose up -d
@@ -213,7 +213,7 @@ ssh -N \
 | 웹사이트 / 포럼 | 공지와 토론 | [339936.xyz](https://339936.xyz) |
 | Telegram 그룹 | 실시간 커뮤니티 | [t.me/arestemple](https://t.me/arestemple) |
 | YouTube 튜토리얼 | 설치 및 사용 동영상 | [보기](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
-| GitHub Issues | 재현 가능한 버그와 기능 요청 | [Issue 만들기](https://github.com/baoweise-bot/aimili-vpngate/issues) |
+| GitHub Issues | 재현 가능한 버그와 기능 요청 | [Issue 만들기](https://github.com/kadidalax/aimili-vpngate/issues) |
 | 이메일 | 버그 신고 및 연락 | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
@@ -231,6 +231,6 @@ ssh -N \
 
 <div align="center">
 
-[Stable Release](https://github.com/baoweise-bot/aimili-vpngate/releases/latest) · [Issues](https://github.com/baoweise-bot/aimili-vpngate/issues) · [GPL-3.0 License](../LICENSE)
+[Stable Release](https://github.com/kadidalax/aimili-vpngate/releases/latest) · [Issues](https://github.com/kadidalax/aimili-vpngate/issues) · [GPL-3.0 License](../LICENSE)
 
 </div>
