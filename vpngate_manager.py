@@ -123,7 +123,7 @@ API_SOURCE_DEADLINE_SECONDS = env_int("API_SOURCE_DEADLINE_SECONDS", 6, 2, 30)
 OPENVPN_TEST_TIMEOUT_SECONDS = env_int("OPENVPN_TEST_TIMEOUT_SECONDS", 35, 1)
 MANUAL_TEST_NODE_LIMIT = env_int("MANUAL_TEST_NODE_LIMIT", 5, 1, 20)
 INITIAL_CONNECT_TEST_LIMIT = env_int("INITIAL_CONNECT_TEST_LIMIT", 10, 1, 50)
-NODE_PROBE_WORKERS = env_int("NODE_PROBE_WORKERS", 5, 1, 20)
+NODE_PROBE_WORKERS = env_int("NODE_PROBE_WORKERS", 10, 1, 20)
 PROXY_FAILURE_THRESHOLD = env_int("PROXY_FAILURE_THRESHOLD", 3, 1, 10)
 SWITCH_PREFLIGHT_MAX_AGE_SECONDS = env_int("SWITCH_PREFLIGHT_MAX_AGE_SECONDS", 180, 0, 3600)
 OPENVPN_CMD = os.environ.get("OPENVPN_CMD", "openvpn")
@@ -2305,7 +2305,17 @@ def auto_switch_node(attempt: int = 0) -> None:
         ]
         candidates = apply_routing_filters(candidates, ui_cfg)
             
-        candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
+        if load_ui_config().get("speedtest", {}).get("auto_switch_fastest"):
+            candidates.sort(
+                key=lambda n: (
+                    0 if node_speed(n) > 0 else 1,
+                    -node_speed(n),
+                    parse_int(n.get("latency_ms")) or 999999,
+                    -parse_int(n.get("score")),
+                )
+            )
+        else:
+            candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
         
     if candidates:
         next_node = candidates[0]
@@ -2563,11 +2573,40 @@ def connect_node(node_id: str) -> str:
         finish_connection_attempt(token, cancel_event)
         set_state(pending_node_id="")
 
+def parse_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number:
+        return 0.0
+    return number
+
+def node_speed(node: dict[str, Any]) -> float:
+    return parse_float(node.get("speed_mbps"))
+
+def schedule_next_check(base: float | None = None) -> float:
+    """Record when the next periodic pipeline run is due and wake the collector."""
+    base_time = time.time() if base is None else float(base)
+    next_at = base_time + check_interval_seconds()
+    set_state(next_check_at=next_at)
+    collector_wakeup.set()
+    return next_at
+
+def reschedule_after_interval_change() -> float:
+    return schedule_next_check(last_pipeline_end or time.time())
+
 def maintain_valid_nodes(force: bool = False) -> str:
-    global active_openvpn_process, active_openvpn_node_id, is_connecting
+    """Compatibility wrapper: fetch + probe without the speed-test stage."""
+    return run_pipeline("forced" if force else "periodic", with_speedtest=False)
+
+def run_pipeline(trigger: str, with_speedtest: bool) -> str:
+    global active_openvpn_process, active_openvpn_node_id, is_connecting, last_pipeline_end
     ensure_dirs()
+    if trigger not in PIPELINE_TRIGGERS:
+        trigger = "periodic"
     if not maintenance_lock.acquire(blocking=False):
-        msg = "节点维护任务正在运行，请稍后再试"
+        msg = "任务进行中，请稍后再试"
         set_state(last_check_message=msg)
         return msg
     with lock:
@@ -2577,6 +2616,21 @@ def maintain_valid_nodes(force: bool = False) -> str:
             set_state(last_check_message=msg)
             return msg
         is_connecting = True
+    run_id = uuid.uuid4().hex[:12]
+    pipeline_cancel_event.clear()
+    with lock:
+        pipeline_status.update(new_pipeline_status())
+        pipeline_status.update(
+            running=True,
+            run_id=run_id,
+            trigger=trigger,
+            stage="fetch",
+            with_speedtest=bool(with_speedtest),
+            started_at=time.time(),
+            message="正在获取节点列表...",
+        )
+    log_to_json("INFO", "Pipeline", f"管线开始: trigger={trigger} speedtest={'是' if with_speedtest else '否'} run_id={run_id}")
+    speed_settings = speedtest.normalize_settings(load_ui_config().get("speedtest"))
     try:
         # A forced refresh must not tear down a healthy tunnel. It only forces
         # the node-pool maintenance path below.
@@ -2599,6 +2653,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
                         auto_switch_node()
                         is_connecting = True
 
+        # ---- 阶段 1：获取 ------------------------------------------------
         try:
             set_state(is_connecting=True, last_check_message="正在拉取最新的免费 VPN 节点列表...")
             candidates = fetch_candidates()
@@ -2612,6 +2667,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
             candidates = []
 
         if not candidates:
+            pipeline_set(message="没有拉取到新节点")
             return "没有拉取到新节点"
 
         with lock:
@@ -2624,14 +2680,14 @@ def maintain_valid_nodes(force: bool = False) -> str:
             active_node = None
             if active_openvpn_node_id:
                 active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
-                
+
             merged: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
-            
+
             if active_node:
                 merged.append(active_node)
                 seen_ids.add(active_node["id"])
-                
+
             for cand in candidates:
                 if cand["id"] not in seen_ids:
                     previous = current_by_id.get(str(cand["id"]))
@@ -2651,15 +2707,19 @@ def maintain_valid_nodes(force: bool = False) -> str:
                             "is_hosting",
                             "is_mobile",
                             "ip_type_reason",
+                            "speed_mbps",
+                            "speed_tested_at",
+                            "speed_message",
+                            "speed_run_id",
                         ]:
                             if previous.get(key) not in (None, ""):
                                 cand[key] = previous.get(key)
                     merged.append(cand)
                     seen_ids.add(cand["id"])
-                    
+
             if len(merged) > 1000:
                 merged = merged[:1000]
-                
+
             for n in merged:
                 config_path = Path(n["config_file"])
                 if not config_path.exists():
@@ -2667,14 +2727,31 @@ def maintain_valid_nodes(force: bool = False) -> str:
                         config_path.write_text(n["config_text"], encoding="utf-8")
                     except Exception:
                         pass
-                        
+
             write_json(NODES_FILE, merged)
             ip_enrichment_wakeup.set()
+
+        if pipeline_cancel_event.is_set():
+            pipeline_set(stopped_reason="manual", message="已手动停止")
+            message = f"Fetched {len(candidates)} nodes. Stopped before probing."
+            set_state(last_check_at=time.time(), last_check_message="任务已手动停止")
+            return message
+
+        # ---- 阶段 2：检测 ------------------------------------------------
+        ui_cfg = load_ui_config()
+        with lock:
+            probe_pool = [n for n in read_nodes() if not n.get("active")]
+            probe_pool = apply_routing_filters(probe_pool, ui_cfg, include_unknown_ip_type=True)
+        probe_total = len(probe_pool)
+        probe_offset = 0
+        pipeline_set(stage="probe", probe_total=probe_total, probe_done=0, message="正在检测节点可用性...")
+
+        def probe_progress(done: int, total: int) -> None:
+            pipeline_set(probe_done=min(probe_total, probe_offset + done))
 
         initial_tested_ids: set[str] = set()
         fast_results: list[dict[str, Any]] = []
         systemic_probe_failure = ""
-        ui_cfg = load_ui_config()
         should_fast_connect = (
             ui_cfg.get("connection_enabled", True)
             and ui_cfg.get("routing_mode", "auto") != "fixed_ip"
@@ -2699,7 +2776,14 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 print(f"[快速首连] {msg}", flush=True)
                 log_to_json("INFO", "Main", msg)
                 set_state(is_connecting=True, last_check_message=msg)
-                fast_results = test_multiple_nodes(fast_test_ids, target_available=TARGET_VALID_NODES)
+                fast_results = test_multiple_nodes(
+                    fast_test_ids,
+                    target_available=TARGET_VALID_NODES,
+                    cancel_event=pipeline_cancel_event,
+                    progress_cb=probe_progress,
+                )
+                probe_offset = len(fast_results)
+                pipeline_set(probe_done=min(probe_total, probe_offset))
                 systemic_probe_failure = next(
                     (
                         str(result.get("probe_message") or "")
@@ -2722,20 +2806,10 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     ]
                     available_candidates = apply_routing_filters(available_candidates, ui_cfg)
 
-                if available_candidates:
+                if available_candidates and not pipeline_cancel_event.is_set():
                     is_connecting = False
                     set_state(is_connecting=False, last_check_message="快速首连已找到可用节点，正在建立连接...")
                     auto_switch_node()
-                    if active_openvpn_running():
-                        valid_nodes_count = len([n for n in read_nodes() if n.get("probe_status") == "available"])
-                        message = f"Fetched {len(candidates)} nodes. Fast-tested {len(fast_results)} nodes and connected."
-                        set_state(
-                            last_check_at=time.time(),
-                            last_check_message=message,
-                            active_openvpn_node_id=active_openvpn_node_id,
-                            valid_nodes=valid_nodes_count,
-                        )
-                        return message
                     is_connecting = True
 
         tested_results: list[dict[str, Any]] = []
@@ -2744,8 +2818,10 @@ def maintain_valid_nodes(force: bool = False) -> str:
             print(f"[周期检测] {msg}", flush=True)
             log_to_json("ERROR", "VPN", msg)
             set_state(last_check_message=msg)
+        elif pipeline_cancel_event.is_set():
+            pass
         else:
-            # Test remaining non-active nodes from the list
+            # Test every remaining non-active node in the list; no early stop.
             with lock:
                 current_nodes = read_nodes()
                 to_test = [
@@ -2761,17 +2837,34 @@ def maintain_valid_nodes(force: bool = False) -> str:
             log_to_json("INFO", "Main", msg)
 
             set_state(is_connecting=True, last_check_message="正在并发检测所有节点可用性...")
-            tested_results = test_multiple_nodes(to_test_ids, target_available=TARGET_VALID_NODES)
+            tested_results = test_multiple_nodes(
+                to_test_ids,
+                target_available=None,
+                cancel_event=pipeline_cancel_event,
+                progress_cb=probe_progress,
+            )
         is_connecting = False
-        
+
         with lock:
             merged = read_nodes()
-            
+            candidate_ids = {str(c.get("id")) for c in candidates}
+            pruned = [
+                n for n in merged
+                if not (
+                    n.get("id") not in candidate_ids
+                    and n.get("probe_status") == "unavailable"
+                    and not n.get("active")
+                )
+            ]
+            if len(pruned) != len(merged):
+                merged = pruned
+                write_json(NODES_FILE, sort_all_nodes(merged))
+
             # Identify available, unavailable, and active nodes
             available_nodes = [n["id"] for n in merged if n.get("probe_status") == "available"]
             unavailable_nodes = [n["id"] for n in merged if n.get("probe_status") == "unavailable"]
             active_node = next((n["id"] for n in merged if n.get("active")), "无")
-            
+
             status_report = (
                 f"周期节点检测完成。实时同步状态: 获取到候选节点共 {len(merged)} 个。 "
                 f"其中【可用节点】{len(available_nodes)} 个: {available_nodes[:15]}...; "
@@ -2780,22 +2873,22 @@ def maintain_valid_nodes(force: bool = False) -> str:
             )
             print(f"[周期检测] {status_report}", flush=True)
             log_to_json("INFO", "Main", status_report)
-            
+
             if active_node != "无" and not active_openvpn_running():
                 warn_msg = f"[诊断警告] 活动节点 {active_node} 被标记为活动状态，但 OpenVPN 进程实际并未正常运行！"
                 print(warn_msg, flush=True)
                 log_to_json("WARNING", "Main", warn_msg)
-            
-            if not active_openvpn_running():
+
+            if not active_openvpn_running() and not pipeline_cancel_event.is_set():
                 ui_cfg = load_ui_config()
                 connection_enabled = ui_cfg.get("connection_enabled", True)
                 if connection_enabled:
                     routing_mode = ui_cfg.get("routing_mode", "auto")
-                    
+
                     if routing_mode != "fixed_ip":
                         available_candidates = [n for n in merged if n.get("probe_status") == "available"]
                         available_candidates = apply_routing_filters(available_candidates, ui_cfg)
-                        
+
                         if available_candidates:
                             auto_switch_node()
 
@@ -2808,12 +2901,250 @@ def maintain_valid_nodes(force: bool = False) -> str:
             active_openvpn_node_id=active_openvpn_node_id,
             valid_nodes=valid_nodes_count,
         )
+
+        if pipeline_cancel_event.is_set():
+            pipeline_set(stopped_reason="manual", message="已手动停止")
+            set_state(last_check_message="任务已手动停止")
+            return message + " Stopped manually."
+
+        # ---- 阶段 3 与 4：筛选、测速 ---------------------------------------
+        stopped_reason = ""
+        speed_ran = False
+        if with_speedtest:
+            set_state(is_connecting=False)
+            ui_cfg = load_ui_config()
+            active_id = active_openvpn_node_id if active_openvpn_running() else ""
+            with lock:
+                speed_candidates = speedtest.select_candidates(
+                    read_nodes(),
+                    speed_settings,
+                    lambda items: apply_routing_filters(items, ui_cfg, include_unknown_ip_type=True),
+                    active_id,
+                    time.time(),
+                )
+            speed_ran = True
+            stopped_reason = run_speed_stage(speed_candidates, speed_settings, run_id)
+            message += f" Speed-tested {pipeline_snapshot().get('speed_done', 0)} of {len(speed_candidates)} nodes."
+
+        # ---- 阶段 5：切换判定 ----------------------------------------------
+        if speed_ran and stopped_reason in ("", "threshold") and speed_settings.get("auto_switch_fastest"):
+            pipeline_set(stage="switch", message="正在判定是否切换到最快节点...")
+            try:
+                if maybe_switch_to_fastest(run_id, speed_settings):
+                    message += " Switched to fastest node."
+            except Exception as exc:
+                log_to_json("ERROR", "Pipeline", f"最快节点切换判定异常: {exc}")
+
+        if stopped_reason == "manual":
+            set_state(last_check_message="任务已手动停止")
+        else:
+            set_state(last_check_message=message)
+        pipeline_set(message=message)
         return message
     except Exception as e:
+        pipeline_set(stopped_reason="error", message=str(e))
+        log_to_json("ERROR", "Pipeline", f"管线异常终止: {e}")
         raise e
     finally:
         is_connecting = False
+        last_pipeline_end = time.time()
+        pipeline_set(running=False, stage="idle", current_node_id="", finished_at=last_pipeline_end)
+        set_state(is_connecting=False)
         maintenance_lock.release()
+        try:
+            schedule_next_check(last_pipeline_end)
+        except Exception as exc:
+            log_to_json("WARNING", "Pipeline", f"安排下次检测失败: {exc}")
+
+def measure_node_speed(node: dict[str, Any], settings: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Measure one node. The active node is measured over tun0; others get a temporary tunnel."""
+    settings = speedtest.normalize_settings(settings)
+    node_id = str(node.get("id") or "")
+    max_bytes = int(settings["per_node_max_mb"]) * 1_000_000
+    max_seconds = int(settings["per_node_seconds"])
+    url = speedtest.build_url(settings["url"], max_bytes)
+    result: dict[str, Any] = {
+        "id": node_id,
+        "speed_mbps": 0.0,
+        "speed_tested_at": time.time(),
+        "speed_message": "",
+        "speed_run_id": run_id,
+    }
+
+    def apply_measurement(dev: str) -> None:
+        measured = speedtest.measure_download(
+            url,
+            dev,
+            max_seconds,
+            max_bytes,
+            pipeline_cancel_event,
+            resolver=lambda host: proxy_server.resolve_dns_over_device(host, dev),
+        )
+        result["speed_tested_at"] = time.time()
+        if measured.error:
+            result["speed_mbps"] = 0.0
+            result["speed_message"] = measured.error
+            log_to_json("WARNING", "SpeedTest", f"节点 {node_id} 测速失败: {measured.error}")
+        else:
+            result["speed_mbps"] = round(measured.mbps, 3)
+            result["speed_message"] = f"{measured.bytes / 1_000_000:.1f} MB / {measured.seconds:.1f} s"
+            log_to_json("INFO", "SpeedTest", f"节点 {node_id} 实测 {speedtest.format_speed(measured.mbps)}（{result['speed_message']}）")
+
+    is_active = bool(node_id) and active_openvpn_running() and node_id == active_openvpn_node_id
+    if is_active:
+        apply_measurement("tun0")
+        return result
+
+    idx: int | None = None
+    process: subprocess.Popen[str] | None = None
+    temp_path: Path | None = None
+    dev = ""
+    table = 0
+    routing_ready = False
+    try:
+        idx = get_free_test_index()
+        dev = f"tun{idx}"
+        table = 100 + idx
+        temp_path = test_config_path(node_id)
+        CONFIG_DIR.mkdir(exist_ok=True, parents=True)
+        temp_path.write_text(str(node.get("config_text") or ""), encoding="utf-8")
+        ok, message, process = run_openvpn_until_ready(
+            str(temp_path),
+            keep_alive=True,
+            route_nopull=True,
+            timeout=12,
+            dev=dev,
+            cancel_event=pipeline_cancel_event,
+            report_state=False,
+            log_prefix=f"[SpeedTest {dev}]",
+        )
+        if not ok:
+            result["speed_message"] = message
+            if not pipeline_cancel_event.is_set():
+                result["probe_status"] = "unavailable"
+                result["probe_message"] = message
+                result["probed_at"] = time.time()
+                log_to_json("WARNING", "SpeedTest", f"节点 {node_id} 测速前连接失败，标记为不可用: {message}")
+            return result
+        result["probe_status"] = "available"
+        if not setup_policy_routing(dev, table):
+            result["speed_message"] = "测速隧道策略路由配置失败"
+            return result
+        routing_ready = True
+        apply_measurement(dev)
+    except Exception as exc:
+        result["speed_message"] = str(exc)
+        log_to_json("WARNING", "SpeedTest", f"节点 {node_id} 测速异常: {exc}")
+    finally:
+        if routing_ready:
+            cleanup_policy_routing(dev, table)
+        if process is not None:
+            stop_process(process)
+        if idx is not None:
+            release_test_index(idx)
+        if temp_path is not None:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+    return result
+
+def run_speed_stage(candidates: list[dict[str, Any]], settings: dict[str, Any], run_id: str) -> str:
+    """Measure candidates one by one. Returns the stopped_reason ("" / "manual" / "threshold")."""
+    settings = speedtest.normalize_settings(settings)
+    threshold = float(settings["stop_threshold_mbps"])
+    pipeline_set(
+        stage="speedtest",
+        speed_total=len(candidates),
+        speed_done=0,
+        current_node_id="",
+        best_node_id="",
+        best_speed_mbps=0.0,
+        message=f"开始逐个测速，共 {len(candidates)} 个节点",
+    )
+    log_to_json("INFO", "SpeedTest", f"开始逐个测速，共 {len(candidates)} 个节点，run_id={run_id}")
+    done = 0
+    best_id = ""
+    best_speed = 0.0
+    for node in candidates:
+        if pipeline_cancel_event.is_set():
+            pipeline_set(stopped_reason="manual", message="测速已手动停止")
+            return "manual"
+        node_id = str(node.get("id") or "")
+        pipeline_set(current_node_id=node_id, message=f"正在测速 {node_id}")
+        set_state(last_check_message=f"正在测速节点 {node_id}（{done + 1}/{len(candidates)}）")
+        result = measure_node_speed(node, settings, run_id)
+        with lock:
+            nodes = read_nodes()
+            for item in nodes:
+                if item.get("id") == node_id:
+                    item.update(result)
+                    break
+            write_json(NODES_FILE, sort_all_nodes(nodes))
+        done += 1
+        speed = parse_float(result.get("speed_mbps"))
+        if speed > best_speed:
+            best_speed = speed
+            best_id = node_id
+        pipeline_set(speed_done=done, current_node_id="", best_node_id=best_id, best_speed_mbps=best_speed)
+        if threshold > 0 and speed >= threshold:
+            msg = f"节点 {node_id} 达到阈值 {threshold} MB/s，停止本轮测速"
+            log_to_json("INFO", "SpeedTest", msg)
+            pipeline_set(stopped_reason="threshold", message=msg)
+            return "threshold"
+    if pipeline_cancel_event.is_set():
+        pipeline_set(stopped_reason="manual", message="测速已手动停止")
+        return "manual"
+    pipeline_set(message=f"测速完成，共 {done} 个节点")
+    return ""
+
+def maybe_switch_to_fastest(run_id: str, settings: dict[str, Any]) -> bool:
+    settings = speedtest.normalize_settings(settings)
+    if not settings.get("auto_switch_fastest"):
+        return False
+    ui_cfg = load_ui_config()
+    if not ui_cfg.get("connection_enabled", True):
+        return False
+    if ui_cfg.get("routing_mode", "auto") == "fixed_ip":
+        return False
+    with lock:
+        nodes = read_nodes()
+        current_id = active_openvpn_node_id if active_openvpn_running() else ""
+        candidates = [
+            n for n in nodes
+            if n.get("speed_run_id") == run_id
+            and node_speed(n) > 0
+            and n.get("probe_status") == "available"
+        ]
+        candidates = apply_routing_filters(candidates, ui_cfg)
+    current_speed: float | None = None
+    if current_id:
+        current = next((n for n in nodes if n.get("id") == current_id), None)
+        if current and current.get("speed_run_id") == run_id and node_speed(current) > 0:
+            current_speed = node_speed(current)
+    candidates.sort(key=lambda n: -node_speed(n))
+    margin = float(settings.get("switch_margin_percent", 20))
+    for candidate in candidates[:3]:
+        candidate_id = str(candidate.get("id") or "")
+        candidate_speed = node_speed(candidate)
+        if candidate_id == current_id:
+            log_to_json("INFO", "Pipeline", f"当前节点 {current_id} 已是本轮最快，无需切换")
+            return False
+        if current_speed is not None and candidate_speed <= current_speed * (1 + margin / 100.0):
+            log_to_json(
+                "INFO",
+                "Pipeline",
+                f"最快节点 {candidate_id}（{speedtest.format_speed(candidate_speed)}）未超过当前 {speedtest.format_speed(current_speed)} 的 {margin:.0f}% 滞后，不切换",
+            )
+            return False
+        try:
+            log_to_json("INFO", "Pipeline", f"切换到本轮最快节点 {candidate_id}（{speedtest.format_speed(candidate_speed)}）")
+            connect_node(candidate_id)
+            return True
+        except Exception as exc:
+            log_to_json("WARNING", "Pipeline", f"切换到最快节点 {candidate_id} 失败: {exc}，尝试下一个")
+    return False
 
 
 def collector_loop() -> None:

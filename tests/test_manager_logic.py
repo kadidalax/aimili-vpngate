@@ -780,6 +780,371 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual((proxy_server.socket.SOL_SOCKET, 25, b"tun9"), created[0].options[0])
         self.assertEqual((proxy_server.socket.SOL_SOCKET, 25, b"tun0"), created[1].options[0])
 
+    # ---- v2.2.0 pipeline -------------------------------------------------
+
+    def _pipeline_patches(self, openvpn_result=(True, "ready", None)):
+        return [
+            mock.patch.object(manager.vpn_utils, "ping_latency_ms", return_value=10),
+            mock.patch.object(manager.vpn_utils, "enrich_ip_info"),
+            mock.patch.object(manager, "run_openvpn_until_ready", return_value=openvpn_result),
+            mock.patch.object(manager, "log_to_json"),
+            mock.patch.object(manager, "NODE_PROBE_WORKERS", 5),
+        ]
+
+    def test_pipeline_probes_all_nodes_without_target_limit(self) -> None:
+        candidates = self.write_nodes(12)
+        manager.update_ui_config(connection_enabled=False)
+        patches = self._pipeline_patches()
+        with mock.patch.object(manager, "fetch_candidates", return_value=candidates):
+            started = [patcher.start() for patcher in patches]
+            try:
+                result = manager.run_pipeline("manual_update", with_speedtest=False)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        self.assertIn("Tested 12", result)
+        self.assertEqual(12, started[2].call_count)
+        stored = manager.read_nodes()
+        self.assertEqual(12, sum(node.get("probe_status") == "available" for node in stored))
+        snapshot = manager.pipeline_snapshot()
+        self.assertFalse(snapshot["running"])
+        self.assertEqual("idle", snapshot["stage"])
+        self.assertEqual("manual_update", snapshot["trigger"])
+        self.assertEqual(12, snapshot["probe_total"])
+        self.assertEqual(12, snapshot["probe_done"])
+        self.assertEqual("", snapshot["stopped_reason"])
+        self.assertGreater(manager.get_state()["next_check_at"], manager.time.time() + 3600)
+
+    def test_pipeline_prunes_unavailable_nodes_missing_from_fetch(self) -> None:
+        nodes = self.write_nodes(4)
+        stale = dict(nodes[0], id="stale-node", probe_status="unavailable")
+        keep = dict(nodes[1], id="known-node", probe_status="available", speed_mbps=3.5, speed_run_id="old", speed_tested_at=1.0, speed_message="x")
+        manager.write_json(manager.NODES_FILE, [stale, keep] + nodes[2:])
+        candidates = [dict(keep, probe_status="not_checked", speed_mbps=0)] + nodes[2:]
+        manager.update_ui_config(connection_enabled=False)
+        patches = self._pipeline_patches()
+        with mock.patch.object(manager, "fetch_candidates", return_value=candidates):
+            for patcher in patches:
+                patcher.start()
+            try:
+                manager.run_pipeline("periodic", with_speedtest=False)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        stored = {n["id"]: n for n in manager.read_nodes()}
+        self.assertNotIn("stale-node", stored)
+        self.assertIn("known-node", stored)
+        self.assertEqual(3.5, stored["known-node"]["speed_mbps"])
+        self.assertEqual("old", stored["known-node"]["speed_run_id"])
+
+    def test_pipeline_manual_update_never_speedtests(self) -> None:
+        candidates = self.write_nodes(3)
+        manager.update_ui_config(connection_enabled=False, speedtest={"auto_after_check": True, "auto_switch_fastest": True})
+        patches = self._pipeline_patches()
+        with (
+            mock.patch.object(manager, "fetch_candidates", return_value=candidates),
+            mock.patch.object(manager, "run_speed_stage", return_value="") as speed_stage,
+            mock.patch.object(manager, "maybe_switch_to_fastest") as switch,
+        ):
+            for patcher in patches:
+                patcher.start()
+            try:
+                manager.run_pipeline("manual_update", with_speedtest=False)
+                manager.run_pipeline("forced", with_speedtest=False)
+                manager.maintain_valid_nodes(force=False)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        speed_stage.assert_not_called()
+        switch.assert_not_called()
+
+    def test_pipeline_speedtest_trigger_runs_speed_stage(self) -> None:
+        candidates = self.write_nodes(3)
+        manager.update_ui_config(connection_enabled=False, speedtest={"retest_after_hours": 0, "auto_switch_fastest": True})
+        speeds = {"node-0": 1.5, "node-1": 4.0, "node-2": 2.0}
+
+        def fake_measure(node, settings, run_id):
+            return {
+                "id": node["id"],
+                "speed_mbps": speeds[node["id"]],
+                "speed_tested_at": 123.0,
+                "speed_message": "ok",
+                "speed_run_id": run_id,
+                "probe_status": "available",
+            }
+
+        patches = self._pipeline_patches()
+        with (
+            mock.patch.object(manager, "fetch_candidates", return_value=candidates),
+            mock.patch.object(manager, "measure_node_speed", side_effect=fake_measure) as measure,
+            mock.patch.object(manager, "maybe_switch_to_fastest", return_value=False) as switch,
+        ):
+            for patcher in patches:
+                patcher.start()
+            try:
+                result = manager.run_pipeline("manual_speedtest", with_speedtest=True)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        self.assertIn("Speed-tested 3 of 3", result)
+        self.assertEqual(3, measure.call_count)
+        stored = {n["id"]: n for n in manager.read_nodes()}
+        self.assertEqual(4.0, stored["node-1"]["speed_mbps"])
+        run_id = stored["node-1"]["speed_run_id"]
+        switch.assert_called_once()
+        self.assertEqual(run_id, switch.call_args.args[0])
+        snapshot = manager.pipeline_snapshot()
+        self.assertEqual(3, snapshot["speed_done"])
+        self.assertEqual("node-1", snapshot["best_node_id"])
+        self.assertEqual(4.0, snapshot["best_speed_mbps"])
+        self.assertTrue(snapshot["with_speedtest"])
+
+    def test_pipeline_returns_busy_when_locked(self) -> None:
+        self.assertTrue(manager.maintenance_lock.acquire(blocking=False))
+        try:
+            with mock.patch.object(manager, "fetch_candidates") as fetch:
+                result = manager.run_pipeline("manual_speedtest", with_speedtest=True)
+        finally:
+            manager.maintenance_lock.release()
+        self.assertEqual("任务进行中，请稍后再试", result)
+        fetch.assert_not_called()
+
+    def test_speed_stage_stops_at_threshold(self) -> None:
+        self.write_nodes(3)
+        candidates = [{"id": "node-0", "config_text": ""}, {"id": "node-1", "config_text": ""}, {"id": "node-2", "config_text": ""}]
+        speeds = iter([1.0, 5.0, 9.0])
+
+        def fake_measure(node, settings, run_id):
+            return {"id": node["id"], "speed_mbps": next(speeds), "speed_tested_at": 1.0, "speed_message": "", "speed_run_id": run_id}
+
+        manager.pipeline_cancel_event.clear()
+        with mock.patch.object(manager, "measure_node_speed", side_effect=fake_measure) as measure, mock.patch.object(manager, "log_to_json"):
+            reason = manager.run_speed_stage(candidates, {"stop_threshold_mbps": 4}, "run-x")
+        self.assertEqual("threshold", reason)
+        self.assertEqual(2, measure.call_count)
+        snapshot = manager.pipeline_snapshot()
+        self.assertEqual("threshold", snapshot["stopped_reason"])
+        self.assertEqual(2, snapshot["speed_done"])
+        self.assertEqual("node-1", snapshot["best_node_id"])
+        stored = {n["id"]: n for n in manager.read_nodes()}
+        self.assertEqual(5.0, stored["node-1"]["speed_mbps"])
+        self.assertNotIn("speed_mbps", stored["node-2"])
+
+    def test_speed_stage_cancel_keeps_results_and_skips_switch(self) -> None:
+        candidates = self.write_nodes(3)
+        manager.update_ui_config(connection_enabled=False, speedtest={"retest_after_hours": 0, "auto_switch_fastest": True})
+
+        def fake_measure(node, settings, run_id):
+            manager.pipeline_cancel_event.set()
+            return {"id": node["id"], "speed_mbps": 7.0, "speed_tested_at": 1.0, "speed_message": "ok", "speed_run_id": run_id}
+
+        patches = self._pipeline_patches()
+        with (
+            mock.patch.object(manager, "fetch_candidates", return_value=candidates),
+            mock.patch.object(manager, "measure_node_speed", side_effect=fake_measure) as measure,
+            mock.patch.object(manager, "maybe_switch_to_fastest") as switch,
+        ):
+            for patcher in patches:
+                patcher.start()
+            try:
+                manager.run_pipeline("manual_speedtest", with_speedtest=True)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        self.assertEqual(1, measure.call_count)
+        switch.assert_not_called()
+        snapshot = manager.pipeline_snapshot()
+        self.assertEqual("manual", snapshot["stopped_reason"])
+        self.assertFalse(snapshot["running"])
+        stored = {n["id"]: n for n in manager.read_nodes()}
+        self.assertEqual(1, sum(1 for n in stored.values() if n.get("speed_mbps") == 7.0))
+        self.assertFalse(manager.pipeline_cancel_event.is_set() and manager.maintenance_lock.locked())
+
+    def test_measure_node_speed_marks_unreachable_node_unavailable(self) -> None:
+        manager.pipeline_cancel_event.clear()
+        node = {"id": "node-x", "config_text": "client\n"}
+        with (
+            mock.patch.object(manager, "run_openvpn_until_ready", return_value=(False, "[错误代码 2101] timeout", None)) as openvpn,
+            mock.patch.object(manager, "setup_policy_routing") as routing,
+            mock.patch.object(manager.speedtest, "measure_download") as download,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            result = manager.measure_node_speed(node, manager.speedtest.DEFAULT_SETTINGS, "run-1")
+        self.assertEqual("unavailable", result["probe_status"])
+        self.assertEqual("[错误代码 2101] timeout", result["speed_message"])
+        self.assertEqual(0.0, result["speed_mbps"])
+        self.assertEqual("run-1", result["speed_run_id"])
+        routing.assert_not_called()
+        download.assert_not_called()
+        kwargs = openvpn.call_args.kwargs
+        self.assertFalse(kwargs["report_state"])
+        self.assertTrue(kwargs["keep_alive"])
+        self.assertTrue(kwargs["route_nopull"])
+        self.assertEqual("tun2", kwargs["dev"])
+        self.assertIn("[SpeedTest tun2]", kwargs["log_prefix"])
+        self.assertEqual(set(), manager.active_test_indexes)
+        self.assertEqual([], list(manager.CONFIG_DIR.glob(".test_*")))
+
+        # A cancelled connection attempt must not mark the node unavailable.
+        manager.pipeline_cancel_event.set()
+        try:
+            with (
+                mock.patch.object(manager, "run_openvpn_until_ready", return_value=(False, "连接操作已取消", None)),
+                mock.patch.object(manager, "log_to_json"),
+            ):
+                result = manager.measure_node_speed(node, manager.speedtest.DEFAULT_SETTINGS, "run-1")
+        finally:
+            manager.pipeline_cancel_event.clear()
+        self.assertNotIn("probe_status", result)
+
+    def test_measure_node_speed_cleans_up_on_failure(self) -> None:
+        manager.pipeline_cancel_event.clear()
+        process = FakeProcess()
+        node = {"id": "node-y", "config_text": "client\n"}
+        with (
+            mock.patch.object(manager, "run_openvpn_until_ready", return_value=(True, "ok", process)),
+            mock.patch.object(manager, "setup_policy_routing", return_value=True) as setup,
+            mock.patch.object(manager, "cleanup_policy_routing") as cleanup,
+            mock.patch.object(manager.speedtest, "measure_download", side_effect=RuntimeError("boom")),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            result = manager.measure_node_speed(node, {"per_node_max_mb": 5, "per_node_seconds": 4}, "run-2")
+        self.assertEqual("boom", result["speed_message"])
+        self.assertEqual("available", result["probe_status"])
+        setup.assert_called_once_with("tun2", 102)
+        cleanup.assert_called_once_with("tun2", 102)
+        self.assertTrue(process.terminated)
+        self.assertEqual(set(), manager.active_test_indexes)
+        self.assertEqual([], list(manager.CONFIG_DIR.glob(".test_*")))
+
+        # Successful measurement fills the speed fields and the URL carries the byte limit.
+        process = FakeProcess()
+        measured = manager.speedtest.MeasureResult(bytes=5_000_000, seconds=2.0, mbps=2.5)
+        with (
+            mock.patch.object(manager, "run_openvpn_until_ready", return_value=(True, "ok", process)),
+            mock.patch.object(manager, "setup_policy_routing", return_value=True),
+            mock.patch.object(manager, "cleanup_policy_routing"),
+            mock.patch.object(manager.speedtest, "measure_download", return_value=measured) as download,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            result = manager.measure_node_speed(node, {"per_node_max_mb": 5, "per_node_seconds": 4, "url": "http://x/{bytes}"}, "run-3")
+        self.assertEqual(2.5, result["speed_mbps"])
+        self.assertEqual("5.0 MB / 2.0 s", result["speed_message"])
+        self.assertEqual("http://x/5000000", download.call_args.args[0])
+        self.assertEqual("tun2", download.call_args.args[1])
+        self.assertEqual(4, download.call_args.args[2])
+        self.assertEqual(5_000_000, download.call_args.args[3])
+        self.assertTrue(process.terminated)
+
+    def test_measure_node_speed_active_node_uses_tun0(self) -> None:
+        manager.pipeline_cancel_event.clear()
+        manager.active_openvpn_process = FakeProcess()
+        manager.active_openvpn_node_id = "active-node"
+        measured = manager.speedtest.MeasureResult(bytes=1_000_000, seconds=1.0, mbps=1.0)
+        with (
+            mock.patch.object(manager, "run_openvpn_until_ready") as openvpn,
+            mock.patch.object(manager, "setup_policy_routing") as setup,
+            mock.patch.object(manager.speedtest, "measure_download", return_value=measured) as download,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            result = manager.measure_node_speed({"id": "active-node", "config_text": ""}, manager.speedtest.DEFAULT_SETTINGS, "run-4")
+        openvpn.assert_not_called()
+        setup.assert_not_called()
+        self.assertEqual("tun0", download.call_args.args[1])
+        self.assertEqual(1.0, result["speed_mbps"])
+        self.assertNotIn("probe_status", result)
+
+    def _speed_nodes(self):
+        nodes = self.write_nodes(4)
+        for index, node in enumerate(nodes):
+            node["probe_status"] = "available"
+            node["country_short"] = "JP" if index < 3 else "US"
+            node["speed_run_id"] = "run-9"
+        nodes[0]["speed_mbps"] = 10.0
+        nodes[0]["active"] = True
+        nodes[1]["speed_mbps"] = 11.0
+        nodes[2]["speed_mbps"] = 13.0
+        nodes[3]["speed_mbps"] = 50.0
+        manager.write_json(manager.NODES_FILE, nodes)
+        return nodes
+
+    def test_switch_to_fastest_respects_margin_fixed_ip_and_routing(self) -> None:
+        self._speed_nodes()
+        manager.active_openvpn_process = FakeProcess()
+        manager.active_openvpn_node_id = "node-0"
+        settings = {"auto_switch_fastest": True, "switch_margin_percent": 20}
+        manager.update_ui_config(routing_mode="fixed_region", force_country="JP")
+
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            self.assertTrue(manager.maybe_switch_to_fastest("run-9", settings))
+        connect.assert_called_once_with("node-2")  # node-3 is US and filtered out; 13 > 10 * 1.2
+
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            self.assertFalse(manager.maybe_switch_to_fastest("run-9", dict(settings, switch_margin_percent=40)))
+        connect.assert_not_called()
+
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            self.assertFalse(manager.maybe_switch_to_fastest("run-9", dict(settings, auto_switch_fastest=False)))
+            manager.update_ui_config(routing_mode="fixed_ip")
+            self.assertFalse(manager.maybe_switch_to_fastest("run-9", settings))
+            manager.update_ui_config(routing_mode="auto", connection_enabled=False)
+            self.assertFalse(manager.maybe_switch_to_fastest("run-9", settings))
+        connect.assert_not_called()
+
+        # Records from another run are ignored; the current node being fastest ends the check.
+        manager.update_ui_config(connection_enabled=True)
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            self.assertFalse(manager.maybe_switch_to_fastest("other-run", settings))
+        connect.assert_not_called()
+
+        # Unknown current speed: the fastest candidate wins outright.
+        manager.active_openvpn_node_id = "node-unknown"
+        manager.update_ui_config(routing_mode="auto", force_country="")
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            self.assertTrue(manager.maybe_switch_to_fastest("run-9", settings))
+        connect.assert_called_once_with("node-3")
+
+    def test_switch_to_fastest_tries_next_on_failure(self) -> None:
+        self._speed_nodes()
+        manager.active_openvpn_process = None
+        manager.active_openvpn_node_id = ""
+        manager.update_ui_config(routing_mode="auto", force_country="")
+        attempts = []
+
+        def fake_connect(node_id):
+            attempts.append(node_id)
+            if len(attempts) < 3:
+                raise RuntimeError("fail")
+            return "ok"
+
+        with mock.patch.object(manager, "connect_node", side_effect=fake_connect), mock.patch.object(manager, "log_to_json"):
+            self.assertTrue(manager.maybe_switch_to_fastest("run-9", {"auto_switch_fastest": True}))
+        self.assertEqual(["node-3", "node-2", "node-1"], attempts)
+
+        with mock.patch.object(manager, "connect_node", side_effect=RuntimeError("fail")) as connect, mock.patch.object(manager, "log_to_json"):
+            self.assertFalse(manager.maybe_switch_to_fastest("run-9", {"auto_switch_fastest": True}))
+        self.assertEqual(3, connect.call_count)
+
+    def test_auto_switch_prefers_measured_speed_when_enabled(self) -> None:
+        nodes = self.write_nodes(3)
+        for node in nodes:
+            node["probe_status"] = "available"
+        nodes[0]["latency_ms"] = 10
+        nodes[1]["latency_ms"] = 50
+        nodes[1]["speed_mbps"] = 8.0
+        nodes[2]["latency_ms"] = 30
+        nodes[2]["speed_mbps"] = 3.0
+        manager.write_json(manager.NODES_FILE, nodes)
+        manager.update_ui_config(routing_mode="auto", connection_enabled=True, speedtest={"auto_switch_fastest": True})
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            manager.auto_switch_node()
+        connect.assert_called_once_with("node-1")
+
+        manager.update_ui_config(speedtest={"auto_switch_fastest": False})
+        with mock.patch.object(manager, "connect_node") as connect, mock.patch.object(manager, "log_to_json"):
+            manager.auto_switch_node()
+        connect.assert_called_once_with("node-0")
+
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
         manager.write_json(auth_file, {"username": "test", "password": "secret"})
