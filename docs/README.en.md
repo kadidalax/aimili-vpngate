@@ -10,11 +10,7 @@
 
 [简体中文](../README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md)
 
-[Quick install](#quick-install) · [Installation](#installation) · [Connection](#connection) · [Recommended services](#vps) · [Community](#community) · [Legal notice](#legal)
-
-[![Website](https://img.shields.io/badge/Website-339936.xyz-f97316?style=for-the-badge)](https://339936.xyz)
-[![Telegram](https://img.shields.io/badge/Telegram-Community-229ED9?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/arestemple)
-[![YouTube](https://img.shields.io/badge/YouTube-Tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=s-ATfXR8BpI)
+[Quick install](#quick-install) · [Installation](#installation) · [Connection](#connection) · [Feedback](#community) · [Legal notice](#legal)
 
 </div>
 
@@ -44,19 +40,6 @@ The installer prints the complete Web URL, private path, username, and password.
 
 > [!TIP]
 > Enable TUN/TAP in the VPS control panel and verify that `/dev/net/tun` exists. The Web dashboard uses TCP `8787` by default; restrict firewall access to your own IP whenever possible.
-
-<a id="vps"></a>
-## Recommended Services
-
-| Provider | Type | Why we recommend it | Link |
-| --- | --- | --- | --- |
-| **BandwagonHost** | VPS | Optimized China Telecom CN2 GIA, China Unicom 9929, and China Mobile CMIN2 routes; low latency and strong stability for TikTok Live, cross-border commerce, and long-running global services. | [View offer](https://bandwagonhost.com/aff.php?aff=81790) |
-| **RackNerd** | VPS | 4000GB of monthly traffic with strong value for the price; low deployment costs for services that need to run continuously. | [View offer](https://my.racknerd.com/aff.php?aff=18708) |
-| **OpenMili** | AI relay | Direct GPT model access without model substitution, a low-cost 1:2 rate, and image generation support. | [Visit OpenMili](https://openmili.com/) |
-
-Some links are affiliate links. Using them does not increase your price.
-
-Before purchasing, confirm that the selected plan permits TUN/TAP, OpenVPN, and the required network protocols. An affiliate link is not a guarantee that a specific plan will work.
 
 <a id="installation"></a>
 ## Installation
@@ -220,15 +203,11 @@ After the tunnel is established:
 > Port `7928` has no public-facing user authentication by default. Never expose it directly without a firewall, source-IP restriction, or another reliable access-control layer.
 
 <a id="community"></a>
-## Website, Community, and Video
+## Feedback
 
 | Destination | Purpose | Link |
 | --- | --- | --- |
-| Website / forum | Announcements and discussion | [339936.xyz](https://339936.xyz) |
-| Telegram group | Real-time community chat | [t.me/arestemple](https://t.me/arestemple) |
-| YouTube tutorial | Installation and usage video | [Watch](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
 | GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/kadidalax/aimili-vpngate/issues) |
-| Email | Bug reports and contact | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
 ## Scope of Use and Legal Notice

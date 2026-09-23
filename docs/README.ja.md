@@ -10,11 +10,7 @@
 
 [简体中文](../README.md) · [English](README.en.md) · **日本語** · [한국어](README.ko.md)
 
-[クイックインストール](#quick-install) · [インストール](#installation) · [接続方法](#connection) · [おすすめサービス](#vps) · [コミュニティ](#community) · [法的通知](#legal)
-
-[![Website](https://img.shields.io/badge/Website-339936.xyz-f97316?style=for-the-badge)](https://339936.xyz)
-[![Telegram](https://img.shields.io/badge/Telegram-Community-229ED9?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/arestemple)
-[![YouTube](https://img.shields.io/badge/YouTube-Tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=s-ATfXR8BpI)
+[クイックインストール](#quick-install) · [インストール](#installation) · [接続方法](#connection) · [フィードバック](#community) · [法的通知](#legal)
 
 </div>
 
@@ -43,19 +39,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/
 
 > [!TIP]
 > VPS の管理画面で TUN/TAP を有効にし、`/dev/net/tun` が存在することを確認してください。Web のデフォルトポートは TCP `8787` です。可能な限り自分の IP だけを許可してください。
-
-<a id="vps"></a>
-## おすすめサービス
-
-| サービス | 種類 | おすすめポイント | リンク |
-| --- | --- | --- | --- |
-| **BandwagonHost** | VPS | China Telecom CN2 GIA、China Unicom 9929、China Mobile CMIN2 の最適化回線。低遅延で安定しており、TikTok ライブ、越境 EC、長期的な海外向けサービスに適しています。 | [詳細を見る](https://bandwagonhost.com/aff.php?aff=81790) |
-| **RackNerd** | VPS | 月間 4000GB の大容量トラフィックと高いコストパフォーマンス。継続稼働するサービスの導入コストを抑えられます。 | [詳細を見る](https://my.racknerd.com/aff.php?aff=18708) |
-| **OpenMili** | AI 中継 | GPT モデルを差し替えずに提供する AI 中継サービス。低価格な 1:2 レートで、画像生成にも対応しています。 | [OpenMili を見る](https://openmili.com/) |
-
-一部のリンクはアフィリエイトリンクです。リンク経由でも購入価格は上がりません。
-
-購入前に、対象プランが TUN/TAP、OpenVPN、必要なプロトコルを許可していることを確認してください。
 
 <a id="installation"></a>
 ## インストール
@@ -206,15 +189,11 @@ ssh -N \
 > `7928` には、デフォルトで公開用のユーザー認証がありません。ファイアウォール、接続元 IP 制限などの確実なアクセス制御なしで公開しないでください。
 
 <a id="community"></a>
-## Web サイト・コミュニティ・動画
+## フィードバック
 
 | 入口 | 用途 | リンク |
 | --- | --- | --- |
-| Web サイト / フォーラム | お知らせと交流 | [339936.xyz](https://339936.xyz) |
-| Telegram | リアルタイム交流 | [t.me/arestemple](https://t.me/arestemple) |
-| YouTube | インストール・利用方法 | [動画を見る](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
 | GitHub Issues | 再現可能な不具合と機能要望 | [Issue を作成](https://github.com/kadidalax/aimili-vpngate/issues) |
-| メール | 不具合報告と連絡 | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
 ## 利用範囲と法的通知

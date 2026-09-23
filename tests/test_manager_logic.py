@@ -1939,7 +1939,6 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn('role="dialog" aria-modal="true"', manager.INDEX_HTML)
         self.assertIn('aria-label="关闭网页安全设置"', manager.INDEX_HTML)
         self.assertIn('class="option-card active" data-value="auto" aria-pressed="true"', manager.INDEX_HTML)
-        self.assertIn('class="vps-recommend-tab"', manager.INDEX_HTML)
         self.assertIn('position: static;', manager.INDEX_HTML)
         self.assertIn('-webkit-overflow-scrolling: touch;', manager.INDEX_HTML)
         self.assertIn('formatUrlHost(window.location.hostname)', manager.INDEX_HTML)

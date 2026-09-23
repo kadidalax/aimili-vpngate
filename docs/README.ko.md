@@ -10,11 +10,7 @@
 
 [简体中文](../README.md) · [English](README.en.md) · [日本語](README.ja.md) · **한국어**
 
-[빠른 설치](#quick-install) · [설치](#installation) · [연결](#connection) · [추천 서비스](#vps) · [커뮤니티](#community) · [법적 고지](#legal)
-
-[![Website](https://img.shields.io/badge/Website-339936.xyz-f97316?style=for-the-badge)](https://339936.xyz)
-[![Telegram](https://img.shields.io/badge/Telegram-Community-229ED9?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/arestemple)
-[![YouTube](https://img.shields.io/badge/YouTube-Tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=s-ATfXR8BpI)
+[빠른 설치](#quick-install) · [설치](#installation) · [연결](#connection) · [피드백](#community) · [법적 고지](#legal)
 
 </div>
 
@@ -43,19 +39,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/kadidalax/aimili-vpngate/main/
 
 > [!TIP]
 > VPS 제어판에서 TUN/TAP을 활성화하고 `/dev/net/tun`이 존재하는지 확인하십시오. Web 기본 포트는 TCP `8787`이며 가능하면 자신의 IP만 허용하십시오.
-
-<a id="vps"></a>
-## 추천 서비스
-
-| 서비스 | 유형 | 추천 이유 | 링크 |
-| --- | --- | --- | --- |
-| **BandwagonHost** | VPS | China Telecom CN2 GIA, China Unicom 9929, China Mobile CMIN2 최적화 회선. 지연 시간이 짧고 안정적이며 TikTok 라이브, 해외 전자상거래 및 장기 글로벌 서비스에 적합합니다. | [자세히 보기](https://bandwagonhost.com/aff.php?aff=81790) |
-| **RackNerd** | VPS | 월 4000GB의 넉넉한 트래픽과 뛰어난 비용 효율. 장기 실행 서비스의 배포 비용을 낮추기 좋습니다. | [자세히 보기](https://my.racknerd.com/aff.php?aff=18708) |
-| **OpenMili** | AI 중계 | GPT 모델을 바꾸지 않고 제공하는 AI 중계 서비스. 저렴한 1:2 요율과 이미지 생성 기능을 지원합니다. | [OpenMili 방문](https://openmili.com/) |
-
-일부 링크는 제휴 링크이며, 이를 통해 구매해도 가격은 올라가지 않습니다.
-
-구매 전에 선택한 요금제가 TUN/TAP, OpenVPN 및 필요한 네트워크 프로토콜을 허용하는지 확인하십시오.
 
 <a id="installation"></a>
 ## 설치
@@ -206,15 +189,11 @@ ssh -N \
 > `7928`은 기본적으로 공개 사용자 인증을 제공하지 않습니다. 방화벽, 접속 원본 IP 제한 또는 기타 신뢰할 수 있는 접근 제어 없이 공개하지 마십시오.
 
 <a id="community"></a>
-## 웹사이트, 커뮤니티 및 동영상
+## 피드백
 
 | 대상 | 용도 | 링크 |
 | --- | --- | --- |
-| 웹사이트 / 포럼 | 공지와 토론 | [339936.xyz](https://339936.xyz) |
-| Telegram 그룹 | 실시간 커뮤니티 | [t.me/arestemple](https://t.me/arestemple) |
-| YouTube 튜토리얼 | 설치 및 사용 동영상 | [보기](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
 | GitHub Issues | 재현 가능한 버그와 기능 요청 | [Issue 만들기](https://github.com/kadidalax/aimili-vpngate/issues) |
-| 이메일 | 버그 신고 및 연락 | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
 ## 사용 범위 및 법적 고지
