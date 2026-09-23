@@ -6,12 +6,12 @@ V2.2.0 基于上游 V2.1.5，新增出口接管与节点测速能力。更新来
 
 - sing-box 出口接管开关（默认开启）：由本项目独占写入 `/etc/sing-box/conf/90_aimili_vpngate.json`，让 sing-box 全部默认出站经本项目隧道；配置写入前执行 `sing-box check`，失败自动回滚；隧道断开时 sing-box 出站直接失败，不会泄漏 VPS 真实 IP。
 - 全局出口接管开关（默认关闭）：通过策略路由让 VPS 全部本机出站经隧道，SSH、Web 面板、内网与面板自身管理流量豁免；隧道断开时出站立即失败；提供 `--global-exit off` 命令行逃生口。
-- 节点检测周期可在面板设置（1 到 72 小时，默认 24 小时）。
+- 自动任务周期可在“测速”弹窗设置（1 到 72 小时，默认 24 小时）。
 - 线性管线：获取节点，然后对列表全部节点做可用性检测，然后按筛选条件逐个测速，然后按需切换。
 - 节点测速：按状态、国家、IP 类型筛选，逐个经独立测试隧道下载测速（默认单节点最长 8 秒或 20 MB），任一节点达到设定速度即停止本轮。
 - 自动切换最快节点：本轮最快节点比当前节点快超过设定百分比（默认 20%）时切换；固定 IP 模式下不切换，切换失败依次尝试下一个。
-- 面板：代理设置新增全局出口、sing-box 出口开关（含验证按钮与状态行）与检测周期；工具栏新增“测速”弹窗（筛选、时长与流量上限、阈值、滞后、测速地址、自动测速与自动切换开关、实时估算）与“按实测速度”排序；节点表新增“实测速度”列；任务运行时显示阶段进度面板与“停止任务”。
-- API：新增 `/api/singbox_exit`、`/api/singbox_exit/verify`、`/api/global_exit`、`/api/speedtest/settings`、`/api/speedtest/estimate`、`/api/pipeline/speedtest`、`/api/pipeline/stop`；`/api/update_settings` 接受 `check_interval_hours`；`/api/gateway_status` 增加两项出口接管状态；管线运行期间 `/api/test_node` 与 `/api/test_nodes` 返回 409。
+- 面板：代理设置新增全局出口、sing-box 出口开关（含验证按钮与状态行）；工具栏新增“测速”弹窗（筛选、时长与流量上限、阈值、滞后、测速地址、自动测速与自动切换开关、实时估算）与“按实测速度”排序；节点表新增“实测速度”列；任务运行时显示阶段进度面板与“停止任务”；连接状态统一为已连接、正在连接、未连接、出口已阻断四种，后台检测与测速期间保持显示当前节点。
+- API：新增 `/api/singbox_exit`、`/api/singbox_exit/verify`、`/api/global_exit`、`/api/speedtest/settings`、`/api/speedtest/estimate`、`/api/pipeline/speedtest`、`/api/pipeline/stop`；`/api/speedtest/settings` 接受 `check_interval_hours`（`/api/update_settings` 仍兼容）；`/api/gateway_status` 增加两项出口接管状态；管线运行期间 `/api/test_node` 与 `/api/test_nodes` 返回 409。
 - 命令行逃生口：`python3 vpngate_manager.py --global-exit off|on` 与 `--singbox-exit off|on`。
 - 打包：新增 `speedtest.py`、`singbox_exit.py`、`global_exit.py` 三个模块，Dockerfile 与发布压缩包同步收录。
 

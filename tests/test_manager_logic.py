@@ -459,6 +459,9 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertFalse(manager.connection_ready_for_ui(base_state))
         ready_state = {**base_state, "proxy_ready": True, "proxy_ok": True}
         self.assertTrue(manager.connection_ready_for_ui(ready_state))
+        # Background maintenance keeps the tunnel up, so it must not hide the active node.
+        self.assertTrue(manager.connection_ready_for_ui({**ready_state, "is_connecting": True}))
+        self.assertFalse(manager.connection_ready_for_ui({**ready_state, "pending_node_id": "node-2"}))
 
     def test_manual_disconnect_state_clears_all_readiness_flags(self) -> None:
         nodes = self.write_nodes(1)
@@ -804,7 +807,7 @@ class ManagerLogicTests(unittest.TestCase):
             finally:
                 for patcher in reversed(patches):
                     patcher.stop()
-        self.assertIn("Tested 12", result)
+        self.assertIn("检测 12 个", result)
         self.assertEqual(12, started[2].call_count)
         stored = manager.read_nodes()
         self.assertEqual(12, sum(node.get("probe_status") == "available" for node in stored))
@@ -888,7 +891,7 @@ class ManagerLogicTests(unittest.TestCase):
             finally:
                 for patcher in reversed(patches):
                     patcher.stop()
-        self.assertIn("Speed-tested 3 of 3", result)
+        self.assertIn("测速 3/3 个", result)
         self.assertEqual(3, measure.call_count)
         stored = {n["id"]: n for n in manager.read_nodes()}
         self.assertEqual(4.0, stored["node-1"]["speed_mbps"])
@@ -1682,7 +1685,7 @@ class ManagerLogicTests(unittest.TestCase):
             result = manager.maintain_valid_nodes()
 
         self.assertEqual(5, openvpn_mock.call_count)
-        self.assertIn("Tested 5", result)
+        self.assertIn("检测 5 个", result)
 
     def test_cancel_pending_connection_stops_handshake_process(self) -> None:
         process = FakeProcess()
@@ -1897,7 +1900,7 @@ class ManagerLogicTests(unittest.TestCase):
         html = manager.INDEX_HTML
         for element_id in (
             "net_global_exit", "global_exit_status", "net_singbox_exit", "singbox_exit_status",
-            "btn_verify_singbox", "net_check_interval_hours", "next_check_label",
+            "btn_verify_singbox", "st_check_interval_hours", "next_check_label",
             "btn_speedtest", "sort_mode", "speedtest_modal", "st_status", "st_countries", "st_ip_types",
             "st_retest_hours", "st_seconds", "st_max_mb", "st_threshold", "st_threshold_mbit", "st_margin",
             "st_url", "st_auto", "st_auto_switch", "st_estimate", "st_save", "st_save_start", "pipeline_panel",
@@ -1944,7 +1947,7 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn('formatUrlHost(window.location.hostname)', manager.INDEX_HTML)
         self.assertNotIn('id="status" class="status" style="display: none;"', manager.INDEX_HTML)
         self.assertIn('${esc(localProxy)}', manager.INDEX_HTML)
-        self.assertIn('${esc(statusMessage)}', manager.INDEX_HTML)
+        self.assertIn('${esc(state.last_check_message)}', manager.INDEX_HTML)
 
     def test_dashboard_javascript_is_valid(self) -> None:
         if not shutil.which("node"):

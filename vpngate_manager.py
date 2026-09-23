@@ -1768,7 +1768,7 @@ def connection_ready_for_ui(state: dict[str, Any] | None = None) -> bool:
         and current.get("tunnel_ready")
         and current.get("proxy_ready")
         and current.get("proxy_ok")
-        and not current.get("is_connecting")
+        and not current.get("pending_node_id")
     )
 
 def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2741,7 +2741,7 @@ def run_pipeline(trigger: str, with_speedtest: bool) -> str:
 
         if pipeline_cancel_event.is_set():
             pipeline_set(stopped_reason="manual", message="已手动停止")
-            message = f"Fetched {len(candidates)} nodes. Stopped before probing."
+            message = f"获取 {len(candidates)} 个节点，检测前已手动停止"
             set_state(last_check_at=time.time(), last_check_message="任务已手动停止")
             return message
 
@@ -2902,7 +2902,7 @@ def run_pipeline(trigger: str, with_speedtest: bool) -> str:
 
         valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
         total_tested = len(fast_results) + len(tested_results)
-        message = f"Fetched {len(candidates)} nodes. Tested {total_tested} prioritized non-active nodes."
+        message = f"获取 {len(candidates)} 个节点，检测 {total_tested} 个"
         set_state(
             last_check_at=time.time(),
             last_check_message=message,
@@ -2913,7 +2913,7 @@ def run_pipeline(trigger: str, with_speedtest: bool) -> str:
         if pipeline_cancel_event.is_set():
             pipeline_set(stopped_reason="manual", message="已手动停止")
             set_state(last_check_message="任务已手动停止")
-            return message + " Stopped manually."
+            return message + "，已手动停止"
 
         # ---- 阶段 3 与 4：筛选、测速 ---------------------------------------
         stopped_reason = ""
@@ -2932,14 +2932,14 @@ def run_pipeline(trigger: str, with_speedtest: bool) -> str:
                 )
             speed_ran = True
             stopped_reason = run_speed_stage(speed_candidates, speed_settings, run_id)
-            message += f" Speed-tested {pipeline_snapshot().get('speed_done', 0)} of {len(speed_candidates)} nodes."
+            message += f"，测速 {pipeline_snapshot().get('speed_done', 0)}/{len(speed_candidates)} 个"
 
         # ---- 阶段 5：切换判定 ----------------------------------------------
         if speed_ran and stopped_reason in ("", "threshold") and speed_settings.get("auto_switch_fastest"):
             pipeline_set(stage="switch", message="正在判定是否切换到最快节点...")
             try:
                 if maybe_switch_to_fastest(run_id, speed_settings):
-                    message += " Switched to fastest node."
+                    message += "，已切换到最快节点"
             except Exception as exc:
                 log_to_json("ERROR", "Pipeline", f"最快节点切换判定异常: {exc}")
 
@@ -4766,6 +4766,23 @@ INDEX_HTML = r"""<!doctype html>
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .pipeline-panel.idle {
+      padding: 10px 16px;
+      border-color: var(--border-color);
+      animation: none;
+    }
+    .pipeline-idle {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .pipeline-sep {
+      margin: 0 4px;
+      opacity: 0.5;
+    }
     .pipeline-panel {
       display: none;
       background: rgba(22, 30, 49, 0.97);
@@ -5140,11 +5157,6 @@ INDEX_HTML = r"""<!doctype html>
             <div id="singbox_exit_status" class="exit-status"></div>
             <button type="button" id="btn_verify_singbox" class="test-btn" style="margin-top: 8px; height: 30px; padding: 0 12px;" onclick="verifySingboxExit()">验证出口</button>
           </div>
-          <div class="form-group" style="margin-bottom: 0;">
-            <label class="form-label" for="net_check_interval_hours">节点检测周期（小时，1 至 72）</label>
-            <input type="number" id="net_check_interval_hours" class="input-field" min="1" max="72" step="1" placeholder="24">
-            <div id="next_check_label" class="exit-status"></div>
-          </div>
         </div>
 
         <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 16px; margin-bottom: 16px;">
@@ -5246,7 +5258,12 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div class="speedtest-grid" style="margin-bottom: 14px;">
           <div class="form-group" style="margin: 0;">
-            <label class="form-label" for="st_retest_hours">重复测速间隔（小时）</label>
+            <label class="form-label" for="st_check_interval_hours">自动任务周期（小时，1 至 72）</label>
+            <input type="number" id="st_check_interval_hours" class="input-field" min="1" max="72" step="1" placeholder="24">
+            <div id="next_check_label" class="exit-status"></div>
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label class="form-label" for="st_retest_hours" title="这段时间内测过速的节点本轮不再测，0 表示全部重测">跳过 N 小时内已测过的节点</label>
             <input type="number" id="st_retest_hours" class="input-field" min="0" max="720" step="1">
           </div>
           <div class="form-group" style="margin: 0;">
@@ -5806,6 +5823,14 @@ function stableSortNodes() {
   });
 }
 
+// 连接状态只看隧道本身：后台检测/测速不改变它，只有切换节点时才是 connecting
+function connectionPhase(activeNode) {
+  if (activeNode) return "connected";
+  if (state.pending_node_id) return "connecting";
+  const exitHeld = Boolean((state.singbox_exit && state.singbox_exit.applied) || (state.global_exit && state.global_exit.applied));
+  return exitHeld ? "blocked" : "disconnected";
+}
+
 function render(){
   const versionLabel = state.app_version_label || "V2.2.0 正式版";
   if ($("github_version_label")) $("github_version_label").textContent = versionLabel;
@@ -5820,10 +5845,9 @@ function render(){
   // Render separated Active Node Card
   const activeCardContainer = $("active_node_card");
   let activeCardHtml = "";
-  if (state.is_connecting && !activeNode) {
-    const busyTitle = state.maintenance_running ? "正在更新节点" : "正在连接";
-    const busyLatency = state.maintenance_running ? "节点检测中" : (state.active_node_latency || "正在连接...");
-    const busyMessage = state.last_check_message || (state.maintenance_running ? "正在后台拉取并检测节点，已完成的结果会实时显示在下方列表。" : "正在与 VPN 节点建立加密隧道，请稍候...");
+  const phase = connectionPhase(activeNode);
+  if (phase === "connecting") {
+    const busyMessage = state.last_check_message || "正在与 VPN 节点建立加密隧道，请稍候...";
     activeCardHtml = `
       <div class="active-card" style="background: var(--bg-surface); border-color: var(--warning); box-shadow: 0 0 15px rgba(245, 158, 11, 0.15);">
         <div class="active-card-info">
@@ -5832,8 +5856,8 @@ function render(){
           </div>
           <div class="active-card-details">
             <div class="active-card-title" style="color: var(--text-primary);">
-              <span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);"><span class="badge-pulse" style="background: #f59e0b;"></span>${esc(busyTitle)}</span>
-              <strong>${esc(busyLatency)}</strong>
+              <span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);"><span class="badge-pulse" style="background: #f59e0b;"></span>正在连接</span>
+              <strong class="mono">${esc(state.pending_node_id)}</strong>
             </div>
             <div class="active-card-meta" style="margin-top: 4px;">
               ${esc(busyMessage)}
@@ -5886,10 +5910,12 @@ function render(){
           </div>
           <div class="active-card-details">
             <div class="active-card-title" style="color: var(--text-secondary);">
-              <span class="badge unavailable" style="padding: 2px 8px;">未连接</span> 当前未连接 VPN 节点
+              <span class="badge unavailable" style="padding: 2px 8px;">${phase === "blocked" ? "出口已阻断" : "未连接"}</span> 当前未连接 VPN 节点
             </div>
             <div class="active-card-meta" style="margin-top: 4px;">
-              在下方列表中选择一个可用备用节点并点击 “切换” 按钮开始连接。
+              ${phase === "blocked"
+                ? "出口接管已开启，隧道恢复前经 VPN 出口的流量会直接失败，不会回落到 VPS 直连。"
+                : "在下方列表中选择一个可用节点并点击“切换”开始连接。"}
             </div>
           </div>
         </div>
@@ -5906,10 +5932,15 @@ function render(){
   if ($("target")) $("target").textContent = state.target_valid_nodes || 3;
   if ($("active")) $("active").textContent = activeNode ? 1 : 0; 
   
-  const statusMessage = state.last_check_message || "";
-  const activeNodeInfo = activeNode ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${esc(translateCountry(activeNode.country))} (${esc(activeNode.id)})</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
   const localProxy = state.local_proxy || `http://127.0.0.1:${state.proxy_port || 7928}`;
-  if ($("status")) { $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：${esc(localProxy)} | 活动节点：${activeNodeInfo} | 状态：${esc(statusMessage)}`; }
+  const phaseBadge = {
+    connected: activeNode ? `<span class="badge available" style="padding:2px 8px;">已连接 · ${esc(countryFlag(activeNode.country_short))} ${esc(translateCountry(activeNode.country))} ${esc(activeNode.ip || activeNode.remote_host || "")}</span>` : "",
+    connecting: `<span class="badge" style="padding:2px 8px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);">正在连接</span>`,
+    blocked: `<span class="badge unavailable" style="padding:2px 8px;">未连接 · 出口已阻断</span>`,
+    disconnected: `<span class="badge unavailable" style="padding:2px 8px;">未连接</span>`,
+  }[phase];
+  const taskHint = state.pipeline && state.pipeline.running ? `<span style="color: var(--text-secondary);">· 后台任务进行中</span>` : "";
+  if ($("status")) { setHtmlIfChanged($("status"), `<span class="status-dot"></span>本地代理 ${esc(localProxy)} · ${phaseBadge} ${taskHint}`); }
   
   // Update proxy test status card based on background checks
   const pBadge = $("proxy_status_badge");
@@ -5917,7 +5948,7 @@ function render(){
   const pLatVal = $("proxy_latency_val");
   const pBtn = $("btn_test_proxy");
   
-  if (state.is_connecting) {
+  if (phase === "connecting") {
     pBadge.className = "badge";
     pBadge.style.background = "rgba(245, 158, 11, 0.15)";
     pBadge.style.color = "#f59e0b";
@@ -6773,7 +6804,6 @@ function openNetworkModal() {
     
     selectOptionCard('routing_mode', mode);
     selectOptionCard('routing_ip_type', ipType);
-    $("net_check_interval_hours").value = state.check_interval_hours || 24;
   }
   renderExitStatus();
 
@@ -6860,12 +6890,14 @@ function renderExitStatus() {
   $("singbox_exit_status").textContent = sbLines.join("\n");
   $("btn_verify_singbox").disabled = !sb.supported || !sb.applied || exitRequestInFlight;
 
+}
+
+function nextCheckText() {
   const nextAt = Number(state && state.next_check_at) || 0;
   const remaining = nextAt - Date.now() / 1000;
-  const pipelineRunning = Boolean(state && state.pipeline && state.pipeline.running);
-  $("next_check_label").textContent = pipelineRunning
-    ? "任务进行中，结束后重新计时"
-    : (nextAt > 0 ? (remaining > 0 ? `下次自动检测：${formatDurationZh(remaining)}后` : "下次自动检测：即将开始") : "");
+  if (state && state.pipeline && state.pipeline.running) return "任务进行中，结束后重新计时";
+  if (nextAt <= 0) return "";
+  return remaining > 0 ? `下次自动任务：${formatDurationZh(remaining)}后` : "下次自动任务：即将开始";
 }
 
 let exitRequestInFlight = false;
@@ -6957,10 +6989,24 @@ function renderPipelinePanel() {
   if (!panel) return;
   const pipeline = (state && state.pipeline) || {};
   if (!pipeline.running) {
-    if (panel.style.display !== "none") {
-      panel.style.display = "none";
-      panel.innerHTML = "";
+    // 空闲时只占一行：手动节点测试进度，或上一轮结果与下次自动任务时间
+    const parts = [];
+    if (state && state.is_connecting && !state.pending_node_id && state.last_check_message) {
+      parts.push(`<span class="badge-pulse" style="background: var(--warning);"></span>${esc(state.last_check_message)}`);
+    } else if (pipeline.finished_at) {
+      const reason = {manual: "已手动停止", threshold: "达到阈值提前结束", error: "异常结束"}[pipeline.stopped_reason] || "";
+      const summary = pipeline.stopped_reason === "error" ? `异常结束：${pipeline.message || "未知错误"}` : (pipeline.message || reason || "已完成");
+      parts.push(`上一轮（${esc(formatDurationZh(Math.max(0, Date.now() / 1000 - pipeline.finished_at)))}前）：${esc(summary)}`);
     }
+    const next = nextCheckText();
+    if (next) parts.push(esc(next));
+    if (!parts.length) {
+      if (panel.style.display !== "none") { panel.style.display = "none"; panel.innerHTML = ""; }
+      return;
+    }
+    panel.style.display = "block";
+    panel.classList.add("idle");
+    setHtmlIfChanged(panel, `<div class="pipeline-idle">${parts.join('<span class="pipeline-sep">·</span>')}</div>`);
     return;
   }
   const stages = [["fetch", "获取"], ["probe", "检测"], ["speedtest", "测速"], ["switch", "切换"]];
@@ -6976,12 +7022,14 @@ function renderPipelinePanel() {
   if (pipeline.with_speedtest && (pipeline.stage === "speedtest" || pipeline.speed_total)) details.push(`测速 ${pipeline.speed_done || 0}/${pipeline.speed_total || 0}`);
   if (pipeline.current_node_id) details.push(`当前节点 ${pipeline.current_node_id}`);
   if (pipeline.best_node_id) details.push(`最快 ${pipeline.best_node_id}（${formatSpeed(pipeline.best_speed_mbps)}）`);
+  panel.classList.remove("idle");
   const stopLabel = pipeline.stop_requested ? "正在停止..." : "停止任务";
   const html = `
     <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
       <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0;">
         <span style="font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
           <span class="badge-pulse" style="background: var(--primary);"></span>${esc(triggerLabel)}进行中
+          <span style="font-size: 12px; font-weight: 400; color: var(--text-secondary);">当前连接保持不变</span>
         </span>
         <div class="pipeline-stages">${stageHtml}</div>
         <span style="font-size: 13px; color: var(--text-secondary);">${esc(details.join(" · ") || (pipeline.message || "正在获取节点列表..."))}</span>
@@ -7086,6 +7134,8 @@ function openSpeedtestModal() {
   populateSpeedtestCountries(settings.countries || []);
   const ipTypes = new Set(settings.ip_types || []);
   document.querySelectorAll(".st-ip-type").forEach(el => { el.checked = ipTypes.has(el.value); });
+  $("st_check_interval_hours").value = (state && state.check_interval_hours) || 24;
+  $("next_check_label").textContent = nextCheckText();
   $("st_retest_hours").value = settings.retest_after_hours ?? 12;
   $("st_seconds").value = settings.per_node_seconds ?? 8;
   $("st_max_mb").value = settings.per_node_max_mb ?? 20;
@@ -7117,14 +7167,19 @@ async function saveSpeedtestSettings(start) {
   saveBtn.disabled = true;
   startBtn.disabled = true;
   try {
+    const checkIntervalHours = parseInt($("st_check_interval_hours").value);
+    if (isNaN(checkIntervalHours) || checkIntervalHours < 1 || checkIntervalHours > 72) {
+      throw new Error("自动任务周期必须在 1 至 72 小时之间");
+    }
     const response = await fetchWithTimeout("./api/speedtest/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(readSpeedtestForm())
+      body: JSON.stringify({ ...readSpeedtestForm(), check_interval_hours: checkIntervalHours })
     }, 15000);
     const result = await readJsonResponse(response, "保存测速设置失败");
     if (!response.ok || !result.ok) throw new Error(result.error || "保存测速设置失败");
     state.speedtest_settings = result.settings || state.speedtest_settings;
+    if (result.check_interval_hours) state.check_interval_hours = result.check_interval_hours;
     if (start) {
       const startResponse = await fetchWithTimeout("./api/pipeline/speedtest", { method: "POST" }, 15000);
       const startResult = await readJsonResponse(startResponse, "启动测速失败");
@@ -7163,13 +7218,6 @@ async function saveNetwork(e) {
   const routingMode = $("net_routing_mode").value;
   const forceCountry = $("net_force_country").value;
   const routingIpType = $("net_routing_ip_type").value;
-  const checkIntervalHours = parseInt($("net_check_interval_hours").value);
-
-  if (isNaN(checkIntervalHours) || checkIntervalHours < 1 || checkIntervalHours > 72) {
-    errorDivEl.textContent = "节点检测周期必须在 1 至 72 小时之间";
-    errorDivEl.style.display = "block";
-    return;
-  }
   if (isNaN(proxyPort) || proxyPort < 1024 || proxyPort > 65535) {
     errorDivEl.textContent = "代理出站端口范围必须在 1024 至 65535 之间";
     errorDivEl.style.display = "block";
@@ -7204,8 +7252,7 @@ async function saveNetwork(e) {
         proxy_port: proxyPort,
         routing_mode: routingMode,
         force_country: forceCountry,
-        routing_ip_type: routingIpType,
-        check_interval_hours: checkIntervalHours
+        routing_ip_type: routingIpType
       })
     }, 25000);
     const data = await readJsonResponse(res, "保存代理设置失败");
@@ -7724,15 +7771,15 @@ def parse_bool_field(payload: dict[str, Any], key: str) -> bool:
 def parse_check_interval_hours(value: Any) -> int:
     """Parse the pipeline interval field; raises ValueError when outside 1 to 72."""
     if isinstance(value, bool):
-        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时")
+        raise ValueError("自动任务周期必须是 1 至 72 之间的整数小时")
     try:
         hours = int(value)
     except (TypeError, ValueError):
-        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时") from None
+        raise ValueError("自动任务周期必须是 1 至 72 之间的整数小时") from None
     if isinstance(value, float) and value != hours:
-        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时")
+        raise ValueError("自动任务周期必须是 1 至 72 之间的整数小时")
     if not (1 <= hours <= 72):
-        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时")
+        raise ValueError("自动任务周期必须是 1 至 72 之间的整数小时")
     return hours
 
 
@@ -7777,8 +7824,17 @@ def handle_global_exit_request(payload: dict[str, Any]) -> tuple[int, dict[str, 
 def handle_speedtest_settings_request(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     raw = payload.get("speedtest") if isinstance(payload.get("speedtest"), dict) else payload
     settings = speedtest.normalize_settings(raw)
-    update_ui_config(speedtest=settings)
-    return HTTPStatus.OK, {"ok": True, "settings": settings}
+    updates: dict[str, Any] = {"speedtest": settings}
+    interval_changed = False
+    if payload.get("check_interval_hours") is not None:
+        hours = parse_check_interval_hours(payload.get("check_interval_hours"))
+        interval_changed = hours != bounded_int(load_ui_config().get("check_interval_hours"), 24, 1, 72)
+        updates["check_interval_hours"] = hours
+    ui_cfg = update_ui_config(**updates)
+    if interval_changed:
+        set_state(check_interval_hours=ui_cfg["check_interval_hours"])
+        reschedule_after_interval_change()
+    return HTTPStatus.OK, {"ok": True, "settings": settings, "check_interval_hours": bounded_int(ui_cfg.get("check_interval_hours"), 24, 1, 72)}
 
 
 def speedtest_candidates_for(settings: dict[str, Any]) -> list[dict[str, Any]]:
