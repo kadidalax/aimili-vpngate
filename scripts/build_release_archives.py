@@ -19,6 +19,9 @@ RELEASE_FILES = [
     "vpn_utils.py",
     "proxy_server.py",
     "snapshot_utils.py",
+    "speedtest.py",
+    "singbox_exit.py",
+    "global_exit.py",
     "Dockerfile",
     "compose.yaml",
 ]

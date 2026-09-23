@@ -16,6 +16,8 @@ from unittest import mock
 import proxy_server
 import snapshot_utils
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 _import_data_dir = tempfile.TemporaryDirectory()
 _original_data_dir = os.environ.get("VPNGATE_DATA_DIR")
 os.environ["VPNGATE_DATA_DIR"] = _import_data_dir.name
@@ -1592,6 +1594,31 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual("running", services["全局出口接管"]["status"])
         self.assertIn("eth0", services["全局出口接管"]["details"])
         self.assertEqual("boom", services["全局出口接管"]["error"])
+
+    def test_release_archive_includes_new_modules(self) -> None:
+        text = (REPO_ROOT / "scripts" / "build_release_archives.py").read_text(encoding="utf-8")
+        for name in ("speedtest.py", "singbox_exit.py", "global_exit.py"):
+            self.assertIn(f'"{name}"', text)
+
+    def test_dockerfile_copies_new_modules(self) -> None:
+        text = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        copy_lines = [line for line in text.splitlines() if line.startswith("COPY ") and "vpngate_manager.py" in line]
+        compile_lines = [line for line in text.splitlines() if "py_compile" in line]
+        self.assertEqual(1, len(copy_lines))
+        self.assertEqual(1, len(compile_lines))
+        for name in ("speedtest.py", "singbox_exit.py", "global_exit.py"):
+            self.assertIn(name, copy_lines[0])
+            self.assertIn(name, compile_lines[0])
+
+    def test_readme_documents_exit_takeover(self) -> None:
+        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("## 出口接管与节点测速", text)
+        for phrase in (
+            "fail-closed", "IPv6 不经隧道", "--global-exit off", "--singbox-exit off",
+            "ip rule del pref", "ip route del unreachable default table 100",
+            "数秒直连窗口", "Docker 模式限制", "kadidalax/aimili-vpngate",
+        ):
+            self.assertIn(phrase, text, phrase)
 
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
