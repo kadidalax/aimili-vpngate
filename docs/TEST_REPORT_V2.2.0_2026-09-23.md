@@ -1,6 +1,6 @@
 # AimiliVPN v2.2.0 VPS 验收报告（2026-09-23）
 
-依据：`docs/superpowers/specs/2026-09-23-exit-takeover-and-speedtest-design.md` 第 14 章。
+依据：v2.2.0 设计文档的验收清单。
 
 ## 环境
 
