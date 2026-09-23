@@ -1222,6 +1222,202 @@ class ManagerLogicTests(unittest.TestCase):
                 manager.collector_loop()
         schedule.assert_called_once_with(10000.0 - manager.check_interval_seconds() + 30)
 
+    # ---- v2.2.0 exit switches --------------------------------------------
+
+    def _exit_patches(self):
+        fake_singbox_status = lambda enabled, mode, runner, last_error="", verified=None: {
+            "supported": True, "unsupported_reason": "", "enabled": enabled, "applied": enabled,
+            "service_active": True, "last_error": last_error, "config_path": "/x", "verified": verified,
+        }
+        fake_global_status = lambda enabled, mode, runner, last_error="": {
+            "supported": True, "unsupported_reason": "", "enabled": enabled, "applied": enabled,
+            "last_error": last_error, "physical_interface": "eth0", "physical_ips": ["203.0.113.10"],
+            "ssh_ports": [22], "gateway": "203.0.113.1",
+        }
+        return [
+            mock.patch.object(manager.singbox_exit, "is_supported", return_value=(True, "")),
+            mock.patch.object(manager.global_exit, "is_supported", return_value=(True, "")),
+            mock.patch.object(manager.singbox_exit, "status_snapshot", side_effect=fake_singbox_status),
+            mock.patch.object(manager.global_exit, "status_snapshot", side_effect=fake_global_status),
+            mock.patch.object(manager.singbox_exit, "verify_via_clash_api", return_value={"total": 2, "via_tunnel": 2, "checked_at": 1.0}),
+            mock.patch.object(manager.global_exit, "detect_context", return_value=manager.global_exit.Context(interface="eth0")),
+            mock.patch.object(manager, "log_to_json"),
+        ]
+
+    def test_set_global_exit_disables_singbox_and_reenables_on_off(self) -> None:
+        patches = self._exit_patches()
+        for patcher in patches:
+            patcher.start()
+        try:
+            with (
+                mock.patch.object(manager.singbox_exit, "enable", return_value={"applied": True}) as sb_enable,
+                mock.patch.object(manager.singbox_exit, "disable", return_value={"applied": False}) as sb_disable,
+                mock.patch.object(manager.global_exit, "enable", return_value={"applied": True}) as g_enable,
+                mock.patch.object(manager.global_exit, "disable", return_value={"applied": False}) as g_disable,
+            ):
+                result = manager.set_global_exit(True)
+                sb_disable.assert_called_once_with(manager.exit_runner)
+                g_enable.assert_called_once()
+                self.assertEqual("eth0", g_enable.call_args.args[0].interface)
+                cfg = manager.load_ui_config()
+                self.assertTrue(cfg["global_exit_enabled"])
+                self.assertFalse(cfg["singbox_exit_enabled"])
+                self.assertTrue(result["global"]["applied"])
+                self.assertFalse(result["singbox"]["enabled"])
+                self.assertTrue(manager.get_state()["global_exit"]["applied"])
+
+                with self.assertRaises(RuntimeError):
+                    manager.set_singbox_exit(True)
+                sb_enable.assert_not_called()
+
+                result = manager.set_global_exit(False)
+                g_disable.assert_called_once_with(manager.exit_runner)
+                sb_enable.assert_called_once_with(manager.exit_runner)
+                cfg = manager.load_ui_config()
+                self.assertFalse(cfg["global_exit_enabled"])
+                self.assertTrue(cfg["singbox_exit_enabled"])
+                self.assertFalse(result["global"]["enabled"])
+                self.assertEqual(2, result["singbox"]["verified"]["via_tunnel"])
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_set_global_exit_rollback_on_failure(self) -> None:
+        patches = self._exit_patches()
+        for patcher in patches:
+            patcher.start()
+        try:
+            with (
+                mock.patch.object(manager.singbox_exit, "enable", return_value={"applied": True}) as sb_enable,
+                mock.patch.object(manager.singbox_exit, "disable", return_value={"applied": False}) as sb_disable,
+                mock.patch.object(manager.global_exit, "enable", side_effect=RuntimeError("添加规则 pref 30020 失败")),
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    manager.set_global_exit(True)
+            self.assertIn("30020", str(ctx.exception))
+            sb_disable.assert_called_once()
+            sb_enable.assert_called_once()
+            cfg = manager.load_ui_config()
+            self.assertFalse(cfg["global_exit_enabled"])
+            self.assertTrue(cfg["singbox_exit_enabled"])
+            self.assertIn("30020", manager.get_state()["global_exit"]["last_error"])
+
+            # Unsupported platforms refuse to enable and keep the setting off.
+            with mock.patch.object(manager.global_exit, "is_supported", return_value=(False, "仅支持 Linux")):
+                with self.assertRaises(RuntimeError):
+                    manager.set_global_exit(True)
+            self.assertFalse(manager.load_ui_config()["global_exit_enabled"])
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_set_singbox_exit_records_error_and_unsupported_only_saves(self) -> None:
+        patches = self._exit_patches()
+        for patcher in patches:
+            patcher.start()
+        try:
+            with mock.patch.object(manager.singbox_exit, "enable", side_effect=RuntimeError("sing-box check 未通过：bad")):
+                with self.assertRaises(RuntimeError):
+                    manager.set_singbox_exit(True)
+            self.assertIn("check", manager.get_state()["singbox_exit"]["last_error"])
+            with mock.patch.object(manager.singbox_exit, "is_supported", return_value=(False, "Docker")):
+                with mock.patch.object(manager.singbox_exit, "disable") as sb_disable:
+                    status = manager.set_singbox_exit(False)
+            sb_disable.assert_not_called()
+            self.assertFalse(manager.load_ui_config()["singbox_exit_enabled"])
+            self.assertFalse(status["enabled"])
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_disconnect_turns_off_global_exit(self) -> None:
+        manager.update_ui_config(global_exit_enabled=True, connection_enabled=True)
+        with (
+            mock.patch.object(manager, "set_global_exit") as set_global,
+            mock.patch.object(manager, "clear_active_connection_state") as clear_state,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.handle_disconnect_request()
+        set_global.assert_called_once_with(False)
+        clear_state.assert_called_once_with("手动断开连接")
+        self.assertFalse(manager.load_ui_config()["connection_enabled"])
+
+        manager.update_ui_config(global_exit_enabled=False, connection_enabled=True)
+        with (
+            mock.patch.object(manager, "set_global_exit") as set_global,
+            mock.patch.object(manager, "clear_active_connection_state"),
+        ):
+            manager.handle_disconnect_request()
+        set_global.assert_not_called()
+
+    def test_cli_flags_dispatch_and_exit_codes(self) -> None:
+        with (
+            mock.patch.object(manager, "set_global_exit", return_value={"global": {"applied": False}}) as set_global,
+            mock.patch.object(manager, "set_singbox_exit", return_value={"applied": True}) as set_singbox,
+            mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as out,
+        ):
+            self.assertEqual(0, manager.run_cli(["--global-exit", "off"]))
+            set_global.assert_called_once_with(False)
+            self.assertEqual(0, manager.run_cli(["--singbox-exit", "on"]))
+            set_singbox.assert_called_once_with(True)
+            self.assertEqual(1, manager.run_cli(["--global-exit", "maybe"]))
+            self.assertEqual(1, manager.run_cli(["--bogus"]))
+            self.assertEqual(1, manager.run_cli([]))
+        self.assertIn('"ok": true', out.getvalue())
+        self.assertIn("用法", out.getvalue())
+
+        with (
+            mock.patch.object(manager, "set_global_exit", side_effect=RuntimeError("boom")),
+            mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as out,
+        ):
+            self.assertEqual(1, manager.run_cli(["--global-exit", "on"]))
+        self.assertIn("boom", out.getvalue())
+
+    def test_startup_applies_exit_settings(self) -> None:
+        manager.update_ui_config(global_exit_enabled=True, singbox_exit_enabled=True, port=8123)
+        patches = self._exit_patches()
+        for patcher in patches:
+            patcher.start()
+        try:
+            with (
+                mock.patch.object(manager.global_exit, "reconcile", return_value=None) as g_reconcile,
+                mock.patch.object(manager.singbox_exit, "reconcile", return_value=None) as sb_reconcile,
+            ):
+                manager.apply_exit_settings_on_startup()
+            g_reconcile.assert_called_once_with(True, 8123, manager.exit_runner)
+            sb_reconcile.assert_called_once_with(False, manager.exit_runner)
+            self.assertFalse(manager.load_ui_config()["singbox_exit_enabled"])
+            self.assertTrue(manager.get_state()["global_exit"]["enabled"])
+
+            manager.update_ui_config(global_exit_enabled=False, singbox_exit_enabled=True)
+            with (
+                mock.patch.object(manager.global_exit, "reconcile", side_effect=RuntimeError("rules broken")),
+                mock.patch.object(manager.singbox_exit, "reconcile", return_value={"applied": True}) as sb_reconcile,
+            ):
+                manager.reconcile_exits_once()
+            sb_reconcile.assert_called_once_with(True, manager.exit_runner)
+            self.assertEqual("rules broken", manager.get_state()["global_exit"]["last_error"])
+            self.assertEqual("", manager.get_state()["singbox_exit"]["last_error"])
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_teardown_for_restart_disables_applied_rules(self) -> None:
+        with (
+            mock.patch.object(manager.global_exit, "is_supported", return_value=(True, "")),
+            mock.patch.object(manager.global_exit, "is_applied", return_value=True),
+            mock.patch.object(manager.global_exit, "disable") as disable,
+        ):
+            manager.global_exit_teardown_for_restart()
+        disable.assert_called_once_with(manager.exit_runner)
+        with (
+            mock.patch.object(manager.global_exit, "is_supported", return_value=(True, "")),
+            mock.patch.object(manager.global_exit, "is_applied", return_value=False),
+            mock.patch.object(manager.global_exit, "disable") as disable,
+        ):
+            manager.global_exit_teardown_for_restart()
+        disable.assert_not_called()
+
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
         manager.write_json(auth_file, {"username": "test", "password": "secret"})

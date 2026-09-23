@@ -30,6 +30,10 @@ import global_exit
 import singbox_exit
 import speedtest
 
+# Mark every urllib connection the manager (and vpn_utils) makes so that the
+# global-exit policy routing keeps management traffic on the physical NIC.
+global_exit.install_marked_urllib_opener()
+
 class DualStackHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
         host, port = server_address
@@ -568,6 +572,9 @@ def log_to_json(level: str, module: str, message: str) -> None:
     except Exception as e:
         print(f"[Log Error] Failed to write JSON log: {e}", flush=True)
 
+singbox_exit.set_logger(log_to_json)
+global_exit.set_logger(log_to_json)
+
 def set_state(**updates: Any) -> None:
     # Keep the read-modify-write transaction atomic across background threads.
     with lock:
@@ -744,6 +751,7 @@ def fetch_api_text_via_proxy(url: str, ptype: str, phost: str, pport: int, use_s
     s = None
     try:
         s = socket.socket(af, socket.SOCK_STREAM)
+        global_exit.mark_socket(s)
         s.settimeout(API_FETCH_TIMEOUT_SECONDS)
         s.connect((phost, pport))
         proxy_user, proxy_pass = vpn_utils.get_upstream_proxy_auth()
@@ -3146,6 +3154,195 @@ def maybe_switch_to_fastest(run_id: str, settings: dict[str, Any]) -> bool:
             log_to_json("WARNING", "Pipeline", f"切换到最快节点 {candidate_id} 失败: {exc}，尝试下一个")
     return False
 
+
+_KEEP = object()
+
+def ui_listen_port() -> int:
+    return bounded_int(load_ui_config().get("port"), UI_PORT, 1, 65535)
+
+def exit_status_copy(kind: str) -> dict[str, Any]:
+    with lock:
+        return json.loads(json.dumps(exit_status[kind]))
+
+def refresh_exit_status(singbox_error: Any = _KEEP, global_error: Any = _KEEP, verified: Any = _KEEP) -> None:
+    ui_cfg = load_ui_config()
+    with lock:
+        previous_singbox = dict(exit_status["singbox"])
+        previous_global = dict(exit_status["global"])
+    singbox_last_error = previous_singbox.get("last_error", "") if singbox_error is _KEEP else str(singbox_error or "")
+    global_last_error = previous_global.get("last_error", "") if global_error is _KEEP else str(global_error or "")
+    singbox_verified = previous_singbox.get("verified") if verified is _KEEP else verified
+    singbox_snapshot = singbox_exit.status_snapshot(
+        bool(ui_cfg.get("singbox_exit_enabled", True)),
+        DEPLOYMENT_MODE,
+        exit_runner,
+        singbox_last_error,
+        singbox_verified,
+    )
+    global_snapshot = global_exit.status_snapshot(
+        bool(ui_cfg.get("global_exit_enabled", False)),
+        DEPLOYMENT_MODE,
+        exit_runner,
+        global_last_error,
+    )
+    with lock:
+        exit_status["singbox"] = singbox_snapshot
+        exit_status["global"] = global_snapshot
+
+def set_singbox_exit(enabled: bool) -> dict[str, Any]:
+    enabled = bool(enabled)
+    if enabled and load_ui_config().get("global_exit_enabled"):
+        raise RuntimeError("全局出口开启期间 sing-box 出口由系统接管，请先关闭全局出口")
+    update_ui_config(singbox_exit_enabled=enabled)
+    supported, _reason = singbox_exit.is_supported(DEPLOYMENT_MODE)
+    if not supported:
+        refresh_exit_status(singbox_error="", verified=None)
+        return exit_status_copy("singbox")
+    try:
+        if enabled:
+            singbox_exit.enable(exit_runner)
+        else:
+            singbox_exit.disable(exit_runner)
+    except Exception as exc:
+        refresh_exit_status(singbox_error=str(exc), verified=None)
+        raise RuntimeError(str(exc)) from exc
+    verified = singbox_exit.verify_via_clash_api() if enabled else None
+    refresh_exit_status(singbox_error="", verified=verified)
+    return exit_status_copy("singbox")
+
+def set_global_exit(enabled: bool) -> dict[str, Any]:
+    enabled = bool(enabled)
+    supported, reason = global_exit.is_supported(DEPLOYMENT_MODE)
+    if enabled:
+        if not supported:
+            refresh_exit_status(global_error=reason)
+            raise RuntimeError(reason)
+        update_ui_config(global_exit_enabled=True)
+        try:
+            set_singbox_exit(False)
+        except Exception as exc:
+            log_to_json("ERROR", "GlobalExit", f"关闭 sing-box 出口失败（继续开启全局出口）: {exc}")
+        try:
+            context = global_exit.detect_context(ui_listen_port(), exit_runner)
+            global_exit.enable(context, exit_runner)
+        except Exception as exc:
+            update_ui_config(global_exit_enabled=False)
+            try:
+                set_singbox_exit(True)
+            except Exception as restore_exc:
+                log_to_json("ERROR", "GlobalExit", f"回滚后重新打开 sing-box 出口失败: {restore_exc}")
+            refresh_exit_status(global_error=str(exc))
+            raise RuntimeError(str(exc)) from exc
+        refresh_exit_status(global_error="")
+        log_to_json("INFO", "GlobalExit", "全局出口已开启")
+    else:
+        update_ui_config(global_exit_enabled=False)
+        error = ""
+        if supported:
+            try:
+                global_exit.disable(exit_runner)
+            except Exception as exc:
+                error = str(exc)
+                log_to_json("ERROR", "GlobalExit", f"关闭全局出口失败: {exc}")
+        try:
+            set_singbox_exit(True)
+        except Exception as exc:
+            log_to_json("ERROR", "GlobalExit", f"全局出口关闭后重新打开 sing-box 出口失败: {exc}")
+        refresh_exit_status(global_error=error)
+        if error:
+            raise RuntimeError(error)
+        log_to_json("INFO", "GlobalExit", "全局出口已关闭")
+    return {"global": exit_status_copy("global"), "singbox": exit_status_copy("singbox")}
+
+def reconcile_exits_once() -> None:
+    """Make the sing-box file and the policy rules match the saved switches."""
+    ui_cfg = load_ui_config()
+    global_enabled = bool(ui_cfg.get("global_exit_enabled", False))
+    singbox_enabled = bool(ui_cfg.get("singbox_exit_enabled", True))
+    if global_enabled and singbox_enabled:
+        # The global switch owns the sing-box switch while it is on.
+        singbox_enabled = False
+        update_ui_config(singbox_exit_enabled=False)
+    global_error = ""
+    singbox_error = ""
+    if global_exit.is_supported(DEPLOYMENT_MODE)[0]:
+        try:
+            global_exit.reconcile(global_enabled, ui_listen_port(), exit_runner)
+        except Exception as exc:
+            global_error = str(exc)
+            log_to_json("ERROR", "GlobalExit", f"全局出口核对失败: {exc}")
+    if singbox_exit.is_supported(DEPLOYMENT_MODE)[0]:
+        try:
+            singbox_exit.reconcile(singbox_enabled, exit_runner)
+        except Exception as exc:
+            singbox_error = str(exc)
+            log_to_json("ERROR", "SingBox", f"sing-box 出口核对失败: {exc}")
+    refresh_exit_status(singbox_error=singbox_error, global_error=global_error)
+
+def apply_exit_settings_on_startup() -> None:
+    try:
+        reconcile_exits_once()
+    except Exception as exc:
+        log_to_json("ERROR", "GlobalExit", f"启动时应用出口设置失败: {exc}")
+
+EXIT_RECONCILE_INTERVAL_SECONDS = 60
+
+def exit_reconcile_loop() -> None:
+    while True:
+        time.sleep(EXIT_RECONCILE_INTERVAL_SECONDS)
+        try:
+            reconcile_exits_once()
+        except Exception as exc:
+            log_to_json("ERROR", "GlobalExit", f"出口核对线程异常: {exc}")
+
+def global_exit_teardown_for_restart() -> None:
+    """Remove policy rules before the process exits; they are re-applied on startup."""
+    try:
+        if global_exit.is_supported(DEPLOYMENT_MODE)[0] and global_exit.is_applied(exit_runner):
+            global_exit.disable(exit_runner)
+            print("[GlobalExit] 进程退出前已拆除全局出口规则", flush=True)
+    except Exception as exc:
+        print(f"[GlobalExit] 退出前拆除全局出口规则失败: {exc}", flush=True)
+
+def graceful_shutdown(signum: int | None = None, frame: Any = None) -> None:
+    print(f"[系统] 收到退出信号 {signum}，正在清理...", flush=True)
+    global_exit_teardown_for_restart()
+    os._exit(0)
+
+def handle_disconnect_request() -> None:
+    global last_active_ping_time, last_active_latency
+    global consecutive_proxy_failures, last_proxy_failure_node_id
+    if load_ui_config().get("global_exit_enabled"):
+        try:
+            set_global_exit(False)
+        except Exception as exc:
+            log_to_json("ERROR", "GlobalExit", f"断开连接前关闭全局出口失败: {exc}")
+    cancel_background_refill()
+    cancel_pending_connection_attempt()
+    update_ui_config(connection_enabled=False)
+    clear_active_connection_state("手动断开连接")
+    last_active_ping_time = 0.0
+    last_active_latency = 0
+    consecutive_proxy_failures = 0
+    last_proxy_failure_node_id = ""
+
+def run_cli(argv: list[str]) -> int:
+    usage = "用法: python3 vpngate_manager.py [--global-exit on|off] [--singbox-exit on|off]"
+    if len(argv) != 2 or argv[0] not in ("--global-exit", "--singbox-exit") or argv[1] not in ("on", "off"):
+        print(usage, flush=True)
+        return 1
+    ensure_dirs()
+    enabled = argv[1] == "on"
+    try:
+        if argv[0] == "--global-exit":
+            result = set_global_exit(enabled)
+        else:
+            result = set_singbox_exit(enabled)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2), flush=True)
+        return 1
+    print(json.dumps({"ok": True, "status": result}, ensure_ascii=False, indent=2), flush=True)
+    return 0
 
 def collector_loop() -> None:
     global last_collector_heartbeat
@@ -7411,6 +7608,7 @@ class Handler(BaseHTTPRequestHandler):
                     def restart_server():
                         time.sleep(2)
                         print("[系统] 管理后台安全配置更新，进程即将退出以触发自动重启...", flush=True)
+                        global_exit_teardown_for_restart()
                         os._exit(0)
                     
                     threading.Thread(target=restart_server, daemon=True).start()
@@ -7481,6 +7679,7 @@ class Handler(BaseHTTPRequestHandler):
                     def restart_server():
                         time.sleep(2)
                         print("[系统] 代理出站端口变更，进程即将退出以触发自动重启...", flush=True)
+                        global_exit_teardown_for_restart()
                         os._exit(0)
                     
                     threading.Thread(target=restart_server, daemon=True).start()
@@ -7637,22 +7836,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/disconnect":
             try:
-                cancel_background_refill()
-                cancel_pending_connection_attempt()
-                ui_cfg = load_ui_config()
-                ui_cfg["connection_enabled"] = False
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
-                
-                clear_active_connection_state("手动断开连接")
-                global last_active_ping_time, last_active_latency
-                last_active_ping_time = 0.0
-                last_active_latency = 0
-                global consecutive_proxy_failures, last_proxy_failure_node_id
-                consecutive_proxy_failures = 0
-                last_proxy_failure_node_id = ""
+                handle_disconnect_request()
                 self.send_json({"ok": True})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -7832,6 +8016,14 @@ def main() -> None:
     else:
         print("[警告] 代理网关启动超时，继续执行脚本...", flush=True)
 
+    if sys.platform.startswith("linux"):
+        try:
+            signal.signal(signal.SIGTERM, graceful_shutdown)
+            signal.signal(signal.SIGINT, graceful_shutdown)
+        except (ValueError, OSError) as exc:
+            print(f"[系统] 注册退出信号失败: {exc}", flush=True)
+    apply_exit_settings_on_startup()
+    threading.Thread(target=exit_reconcile_loop, daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=ip_enrichment_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
@@ -7846,4 +8038,6 @@ def main() -> None:
     DualStackHTTPServer((ui_host, ui_port), Handler).serve_forever()
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        sys.exit(run_cli(sys.argv[1:]))
     main()
