@@ -482,6 +482,58 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual("-", state["proxy_ip"])
         self.assertFalse(any(node.get("active") for node in manager.read_nodes()))
 
+    def test_ui_config_has_v220_defaults(self) -> None:
+        cfg = manager.load_ui_config()
+        self.assertEqual(24, cfg["check_interval_hours"])
+        self.assertTrue(cfg["singbox_exit_enabled"])
+        self.assertFalse(cfg["global_exit_enabled"])
+        self.assertEqual(manager.speedtest.DEFAULT_SETTINGS, cfg["speedtest"])
+
+        auth_file = manager.DATA_DIR / "ui_auth.json"
+        stored = json.loads(auth_file.read_text(encoding="utf-8"))
+        stored["check_interval_hours"] = 999
+        stored["singbox_exit_enabled"] = "yes"
+        stored["speedtest"] = {"per_node_seconds": 1, "url": "ftp://x"}
+        manager.write_json(auth_file, stored)
+        cfg = manager.load_ui_config()
+        self.assertEqual(24, cfg["check_interval_hours"])  # out-of-range falls back to default
+        self.assertTrue(cfg["singbox_exit_enabled"])
+        self.assertEqual(3, cfg["speedtest"]["per_node_seconds"])
+        self.assertEqual(manager.speedtest.DEFAULT_URL, cfg["speedtest"]["url"])
+        persisted = json.loads(auth_file.read_text(encoding="utf-8"))
+        self.assertEqual(24, persisted["check_interval_hours"])
+
+    def test_check_interval_seconds_uses_hours(self) -> None:
+        manager.update_ui_config(check_interval_hours=2)
+        self.assertEqual(7200, manager.check_interval_seconds())
+        manager.update_ui_config(check_interval_hours=0)
+        self.assertEqual(86400, manager.check_interval_seconds())
+
+    def test_state_exposes_pipeline_exit_and_speedtest_settings(self) -> None:
+        manager.pipeline_set(running=True, stage="probe", probe_total=7)
+        try:
+            with manager.lock:
+                manager.exit_status["global"]["applied"] = True
+            state = manager.get_state()
+        finally:
+            manager.pipeline_status.update(manager.new_pipeline_status())
+            with manager.lock:
+                manager.exit_status["global"]["applied"] = False
+        self.assertEqual("probe", state["pipeline"]["stage"])
+        self.assertEqual(7, state["pipeline"]["probe_total"])
+        self.assertTrue(state["global_exit"]["applied"])
+        self.assertIn("supported", state["singbox_exit"])
+        self.assertEqual(24, state["check_interval_hours"])
+        self.assertEqual(0, state["next_check_at"])
+        self.assertEqual(manager.speedtest.DEFAULT_SETTINGS, state["speedtest_settings"])
+
+        manager.set_state(next_check_at=123)
+        persisted = json.loads(manager.STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(123, persisted["next_check_at"])
+        for key in manager.RUNTIME_STATE_KEYS:
+            self.assertNotIn(key, persisted)
+        self.assertEqual(123, manager.get_state()["next_check_at"])
+
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
         manager.write_json(auth_file, {"username": "test", "password": "secret"})

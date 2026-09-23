@@ -26,6 +26,10 @@ import concurrent.futures
 import sys
 import uuid
 
+import global_exit
+import singbox_exit
+import speedtest
+
 class DualStackHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
         host, port = server_address
@@ -184,6 +188,55 @@ last_proxy_failure_node_id = ""
 
 last_collector_heartbeat = 0.0
 last_checker_heartbeat = 0.0
+
+PIPELINE_TRIGGERS = ("periodic", "manual_update", "manual_speedtest", "forced")
+PIPELINE_STAGES = ("idle", "fetch", "probe", "speedtest", "switch")
+RUNTIME_STATE_KEYS = ("pipeline", "singbox_exit", "global_exit", "speedtest_settings", "check_interval_hours")
+
+def new_pipeline_status() -> dict[str, Any]:
+    return {
+        "running": False,
+        "run_id": "",
+        "trigger": "",
+        "stage": "idle",
+        "with_speedtest": False,
+        "started_at": 0.0,
+        "finished_at": 0.0,
+        "probe_total": 0,
+        "probe_done": 0,
+        "speed_total": 0,
+        "speed_done": 0,
+        "current_node_id": "",
+        "best_node_id": "",
+        "best_speed_mbps": 0.0,
+        "stop_requested": False,
+        "stopped_reason": "",
+        "message": "",
+    }
+
+pipeline_status: dict[str, Any] = new_pipeline_status()
+pipeline_cancel_event = threading.Event()
+collector_wakeup = threading.Event()
+last_pipeline_end = 0.0
+exit_runner = singbox_exit.CommandRunner()
+exit_status: dict[str, dict[str, Any]] = {
+    "singbox": {
+        "supported": False, "unsupported_reason": "", "enabled": True, "applied": False,
+        "service_active": None, "last_error": "", "config_path": "", "verified": None,
+    },
+    "global": {
+        "supported": False, "unsupported_reason": "", "enabled": False, "applied": False,
+        "last_error": "", "physical_interface": "", "physical_ips": [], "ssh_ports": [], "gateway": "",
+    },
+}
+
+def pipeline_set(**fields: Any) -> None:
+    with lock:
+        pipeline_status.update(fields)
+
+def pipeline_snapshot() -> dict[str, Any]:
+    with lock:
+        return json.loads(json.dumps(pipeline_status))
 last_pinger_heartbeat = 0.0
 server_start_time = time.time()
 ip_enrichment_wakeup = threading.Event()
@@ -330,6 +383,10 @@ def load_ui_config() -> dict[str, Any]:
             "favorite_node_ids": [],
             "fav_fail_fallback": False,
             "discovery_countries": [],
+            "check_interval_hours": 24,
+            "singbox_exit_enabled": True,
+            "global_exit_enabled": False,
+            "speedtest": speedtest.normalize_settings(None),
         }
         updated = False
         if auth_file.exists():
@@ -341,7 +398,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "discovery_countries"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "discovery_countries", "check_interval_hours", "singbox_exit_enabled", "global_exit_enabled", "speedtest"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -374,6 +431,23 @@ def load_ui_config() -> dict[str, Any]:
         if normalized_discovery_countries != config.get("discovery_countries"):
             config["discovery_countries"] = normalized_discovery_countries
             updated = True
+
+        normalized_interval = bounded_int(config.get("check_interval_hours"), 24, 1, 72)
+        if normalized_interval != config.get("check_interval_hours"):
+            config["check_interval_hours"] = normalized_interval
+            updated = True
+
+        for flag_key, flag_default in (("singbox_exit_enabled", True), ("global_exit_enabled", False)):
+            raw_flag = config.get(flag_key, flag_default)
+            normalized_flag = raw_flag if isinstance(raw_flag, bool) else flag_default
+            if normalized_flag is not raw_flag:
+                config[flag_key] = normalized_flag
+                updated = True
+
+        normalized_speedtest = speedtest.normalize_settings(config.get("speedtest"))
+        if normalized_speedtest != config.get("speedtest"):
+            config["speedtest"] = normalized_speedtest
+            updated = True
             
         if not auth_file.exists() or updated:
             try:
@@ -395,6 +469,22 @@ def persist_discovery_countries(value: Any) -> list[str]:
         DATA_DIR.mkdir(exist_ok=True, parents=True)
         write_json(auth_file, ui_cfg)
     return countries
+
+def save_ui_config(ui_cfg: dict[str, Any]) -> None:
+    auth_file = DATA_DIR / "ui_auth.json"
+    with lock:
+        DATA_DIR.mkdir(exist_ok=True, parents=True)
+        write_json(auth_file, ui_cfg)
+
+def update_ui_config(**updates: Any) -> dict[str, Any]:
+    with lock:
+        ui_cfg = load_ui_config()
+        ui_cfg.update(updates)
+        save_ui_config(ui_cfg)
+        return ui_cfg
+
+def check_interval_seconds() -> int:
+    return bounded_int(load_ui_config().get("check_interval_hours"), 24, 1, 72) * 3600
 
 # 初始化时优先从 ui_auth.json 加载保存的代理出站端口和网页端口配置以覆盖环境变量
 try:
@@ -483,6 +573,8 @@ def set_state(**updates: Any) -> None:
     with lock:
         state = get_state()
         state.update(updates)
+        for key in RUNTIME_STATE_KEYS:
+            state.pop(key, None)
         write_json(STATE_FILE, state)
 
 def read_nodes() -> list[dict[str, Any]]:
@@ -532,6 +624,13 @@ def get_state() -> dict[str, Any]:
     state["favorite_node_ids"] = ui_cfg.get("favorite_node_ids", [])
     state["discovery_countries"] = normalize_discovery_countries(ui_cfg.get("discovery_countries"))
     state["fav_fail_fallback"] = False
+    state["check_interval_hours"] = bounded_int(ui_cfg.get("check_interval_hours"), 24, 1, 72)
+    state.setdefault("next_check_at", 0)
+    state["speedtest_settings"] = speedtest.normalize_settings(ui_cfg.get("speedtest"))
+    state["pipeline"] = pipeline_snapshot()
+    with lock:
+        state["singbox_exit"] = dict(exit_status["singbox"])
+        state["global_exit"] = dict(exit_status["global"])
     
     return state
 
