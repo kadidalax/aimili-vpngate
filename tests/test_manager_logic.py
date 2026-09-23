@@ -1418,6 +1418,181 @@ class ManagerLogicTests(unittest.TestCase):
             manager.global_exit_teardown_for_restart()
         disable.assert_not_called()
 
+    def _post(self, path: str, payload: dict | None = None) -> tuple[int, dict]:
+        """Drive Handler.do_POST without sockets; returns (status, body)."""
+        handler = manager.Handler.__new__(manager.Handler)
+        captured: list[tuple[int, dict]] = []
+
+        def fake_send_json(data, status=manager.HTTPStatus.OK):
+            captured.append((int(status), data))
+
+        handler.send_json = fake_send_json
+        handler.read_json_body = lambda max_bytes=65536: dict(payload or {})
+        handler.read_request_body = lambda max_bytes=65536: b""
+        handler.validate_path = lambda: path
+        handler.is_authorized = lambda: True
+        handler.do_POST()
+        self.assertEqual(1, len(captured), f"expected one response for {path}, got {captured}")
+        return captured[0]
+
+    def _get_gateway_status(self) -> dict:
+        handler = manager.Handler.__new__(manager.Handler)
+        captured: list = []
+        handler.send_json = lambda data, status=manager.HTTPStatus.OK: captured.append(data)
+        handler.validate_path = lambda: "/api/gateway_status"
+        handler.is_authorized = lambda: True
+        with mock.patch.object(manager.vpn_utils, "diagnose_local_obstructions", return_value=None):
+            handler.do_GET()
+        self.assertEqual(1, len(captured))
+        return captured[0]
+
+    def test_api_speedtest_settings_roundtrip(self) -> None:
+        status, body = self._post("/api/speedtest/settings", {
+            "status": "all", "countries": ["jp", "US"], "per_node_seconds": 5,
+            "per_node_max_mb": 10, "stop_threshold_mbps": 4.5, "auto_switch_fastest": True,
+        })
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual("all", body["settings"]["status"])
+        self.assertEqual(["JP", "US"], body["settings"]["countries"])
+        self.assertEqual(5, body["settings"]["per_node_seconds"])
+        self.assertTrue(body["settings"]["auto_switch_fastest"])
+        self.assertEqual(body["settings"], manager.load_ui_config()["speedtest"])
+        self.assertEqual(body["settings"], manager.get_state()["speedtest_settings"])
+        # nested "speedtest" object is accepted as well
+        status, body = self._post("/api/speedtest/settings", {"speedtest": {"per_node_seconds": 3}})
+        self.assertEqual(200, status)
+        self.assertEqual(3, manager.load_ui_config()["speedtest"]["per_node_seconds"])
+
+    def test_api_speedtest_estimate_uses_saved_or_payload_settings(self) -> None:
+        nodes = self.write_nodes(3)
+        for node in nodes:
+            node["probe_status"] = "available"
+        manager.write_json(manager.NODES_FILE, nodes)
+        manager.update_ui_config(speedtest=manager.speedtest.normalize_settings({"per_node_seconds": 4, "per_node_max_mb": 10}))
+        status, body = self._post("/api/speedtest/estimate", {})
+        self.assertEqual(200, status)
+        self.assertEqual(3, body["count"])
+        self.assertEqual(30, body["max_mb"])
+        self.assertEqual(3 * (4 + 16), body["est_seconds"])
+        status, body = self._post("/api/speedtest/estimate", {"per_node_seconds": 4, "per_node_max_mb": 10, "status": "unavailable"})
+        self.assertEqual(200, status)
+        self.assertEqual(0, body["count"])
+
+    def test_api_pipeline_speedtest_conflicts_when_running(self) -> None:
+        with mock.patch.object(manager.threading, "Thread") as thread_cls:
+            status, body = self._post("/api/pipeline/speedtest")
+            self.assertEqual(200, status)
+            self.assertTrue(body["running"])
+            thread_cls.assert_called_once()
+            self.assertEqual(("manual_speedtest", True), thread_cls.call_args.kwargs["args"])
+            self.assertIs(manager.run_pipeline, thread_cls.call_args.kwargs["target"])
+        manager.pipeline_set(running=True)
+        try:
+            with mock.patch.object(manager.threading, "Thread") as thread_cls:
+                status, body = self._post("/api/pipeline/speedtest")
+                self.assertEqual(409, status)
+                self.assertFalse(body["ok"])
+                thread_cls.assert_not_called()
+            status, body = self._post("/api/test_node", {"id": "node-1"})
+            self.assertEqual(409, status)
+            self.assertIn("任务进行中", body["error"])
+            status, body = self._post("/api/test_nodes", {"ids": ["node-1"]})
+            self.assertEqual(409, status)
+            self.assertIn("任务进行中", body["error"])
+            manager.pipeline_cancel_event.clear()
+            status, body = self._post("/api/pipeline/stop")
+            self.assertEqual(200, status)
+            self.assertTrue(manager.pipeline_cancel_event.is_set())
+            self.assertTrue(manager.pipeline_snapshot()["stop_requested"])
+        finally:
+            manager.pipeline_cancel_event.clear()
+            manager.pipeline_set(**manager.new_pipeline_status())
+
+    def test_api_refresh_nodes_starts_manual_update_pipeline(self) -> None:
+        with mock.patch.object(manager.threading, "Thread") as thread_cls:
+            status, body = self._post("/api/refresh_nodes", {})
+        self.assertEqual(200, status)
+        self.assertTrue(body["running"])
+        self.assertIs(manager.run_pipeline, thread_cls.call_args.kwargs["target"])
+        self.assertEqual(("manual_update", False), thread_cls.call_args.kwargs["args"])
+
+    def test_api_update_settings_validates_interval(self) -> None:
+        base = {"proxy_port": 7928, "routing_mode": "auto", "routing_ip_type": "all"}
+        for bad in (0, 73, "abc", 1.5, True):
+            status, body = self._post("/api/update_settings", {**base, "check_interval_hours": bad})
+            self.assertEqual(400, status, f"value {bad!r} should be rejected")
+            self.assertIn("1 至 72", body["error"])
+        self.assertEqual(24, manager.load_ui_config()["check_interval_hours"])
+        with mock.patch.object(manager, "reschedule_after_interval_change") as resched:
+            status, body = self._post("/api/update_settings", {**base, "check_interval_hours": "6"})
+            self.assertEqual(200, status, body)
+            resched.assert_called_once()
+            self.assertEqual(6, manager.load_ui_config()["check_interval_hours"])
+            # unchanged value does not reschedule again
+            status, _ = self._post("/api/update_settings", {**base, "check_interval_hours": 6})
+            self.assertEqual(200, status)
+            resched.assert_called_once()
+            # omitted field keeps the saved interval
+            status, _ = self._post("/api/update_settings", base)
+            self.assertEqual(200, status)
+            self.assertEqual(6, manager.load_ui_config()["check_interval_hours"])
+
+    def test_api_exit_switches_validate_and_apply(self) -> None:
+        status, body = self._post("/api/singbox_exit", {"enabled": "yes"})
+        self.assertEqual(400, status)
+        status, body = self._post("/api/global_exit", {})
+        self.assertEqual(400, status)
+        patches = self._exit_patches()
+        for patcher in patches:
+            patcher.start()
+        try:
+            with (
+                mock.patch.object(manager.singbox_exit, "enable"),
+                mock.patch.object(manager.singbox_exit, "disable"),
+                mock.patch.object(manager.global_exit, "enable"),
+                mock.patch.object(manager.global_exit, "disable"),
+            ):
+                status, body = self._post("/api/global_exit", {"enabled": True})
+                self.assertEqual(200, status, body)
+                self.assertTrue(body["status"]["applied"])
+                self.assertFalse(body["singbox_exit"]["enabled"])
+                status, body = self._post("/api/singbox_exit", {"enabled": True})
+                self.assertEqual(500, status)
+                self.assertIn("全局出口", body["error"])
+                status, body = self._post("/api/global_exit", {"enabled": False})
+                self.assertEqual(200, status, body)
+                self.assertFalse(body["status"]["enabled"])
+                self.assertTrue(body["singbox_exit"]["applied"])
+                status, body = self._post("/api/singbox_exit/verify")
+                self.assertEqual(200, status)
+                self.assertEqual(2, body["verified"]["via_tunnel"])
+                self.assertEqual(2, manager.get_state()["singbox_exit"]["verified"]["total"])
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_gateway_status_lists_exit_services(self) -> None:
+        with manager.lock:
+            manager.exit_status["singbox"].update({"supported": True, "enabled": True, "applied": True, "service_active": True, "last_error": ""})
+            manager.exit_status["global"].update({
+                "supported": True, "enabled": True, "applied": True, "physical_interface": "eth0",
+                "physical_ips": ["203.0.113.10"], "last_error": "boom",
+            })
+        try:
+            body = self._get_gateway_status()
+        finally:
+            with manager.lock:
+                manager.exit_status["singbox"].update({"supported": False, "enabled": True, "applied": False, "service_active": None})
+                manager.exit_status["global"].update({"supported": False, "enabled": False, "applied": False, "physical_interface": "", "physical_ips": [], "last_error": ""})
+        services = {item["name"]: item for item in body["services"]}
+        self.assertIn("sing-box 出口接管", services)
+        self.assertIn("全局出口接管", services)
+        self.assertEqual("running", services["sing-box 出口接管"]["status"])
+        self.assertEqual("running", services["全局出口接管"]["status"])
+        self.assertIn("eth0", services["全局出口接管"]["details"])
+        self.assertEqual("boom", services["全局出口接管"]["error"])
+
     def test_ui_auth_json_is_written_private(self) -> None:
         auth_file = manager.DATA_DIR / "ui_auth.json"
         manager.write_json(auth_file, {"username": "test", "password": "secret"})

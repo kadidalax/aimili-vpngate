@@ -7224,6 +7224,149 @@ def active_node_pinger() -> None:
         time.sleep(10)
 
 
+PIPELINE_BUSY_MESSAGE = "任务进行中，请稍后再试"
+
+
+def parse_bool_field(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"字段 {key} 必须是布尔值")
+    return value
+
+
+def parse_check_interval_hours(value: Any) -> int:
+    """Parse the pipeline interval field; raises ValueError when outside 1 to 72."""
+    if isinstance(value, bool):
+        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时")
+    try:
+        hours = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时") from None
+    if isinstance(value, float) and value != hours:
+        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时")
+    if not (1 <= hours <= 72):
+        raise ValueError("节点检测周期必须是 1 至 72 之间的整数小时")
+    return hours
+
+
+def handle_singbox_exit_request(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    try:
+        enabled = parse_bool_field(payload, "enabled")
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    try:
+        status = set_singbox_exit(enabled)
+    except Exception as exc:
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc), "status": exit_status_copy("singbox")}
+    return HTTPStatus.OK, {"ok": True, "status": status}
+
+
+def handle_singbox_verify_request() -> tuple[int, dict[str, Any]]:
+    try:
+        verified = singbox_exit.verify_via_clash_api()
+        refresh_exit_status(verified=verified)
+    except Exception as exc:
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)}
+    return HTTPStatus.OK, {"ok": True, "verified": verified, "status": exit_status_copy("singbox")}
+
+
+def handle_global_exit_request(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    try:
+        enabled = parse_bool_field(payload, "enabled")
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    try:
+        result = set_global_exit(enabled)
+    except Exception as exc:
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {
+            "ok": False,
+            "error": str(exc),
+            "status": exit_status_copy("global"),
+            "singbox_exit": exit_status_copy("singbox"),
+        }
+    return HTTPStatus.OK, {"ok": True, "status": result["global"], "singbox_exit": result["singbox"]}
+
+
+def handle_speedtest_settings_request(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    raw = payload.get("speedtest") if isinstance(payload.get("speedtest"), dict) else payload
+    settings = speedtest.normalize_settings(raw)
+    update_ui_config(speedtest=settings)
+    return HTTPStatus.OK, {"ok": True, "settings": settings}
+
+
+def speedtest_candidates_for(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    ui_cfg = load_ui_config()
+    active_id = active_openvpn_node_id if active_openvpn_running() else ""
+    with lock:
+        return speedtest.select_candidates(
+            read_nodes(),
+            settings,
+            lambda items: apply_routing_filters(items, ui_cfg, include_unknown_ip_type=True),
+            active_id,
+            time.time(),
+        )
+
+
+def handle_speedtest_estimate_request(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    raw = payload.get("speedtest") if isinstance(payload.get("speedtest"), dict) else payload
+    if raw:
+        settings = speedtest.normalize_settings(raw)
+    else:
+        settings = speedtest.normalize_settings(load_ui_config().get("speedtest"))
+    candidates = speedtest_candidates_for(settings)
+    active_id = active_openvpn_node_id if active_openvpn_running() else ""
+    result = speedtest.estimate(candidates, settings, active_id)
+    return HTTPStatus.OK, {"ok": True, **result}
+
+
+def handle_pipeline_speedtest_request() -> tuple[int, dict[str, Any]]:
+    if maintenance_lock.locked() or pipeline_snapshot().get("running"):
+        return HTTPStatus.CONFLICT, {"ok": False, "error": PIPELINE_BUSY_MESSAGE, "running": True}
+    threading.Thread(target=run_pipeline, args=("manual_speedtest", True), daemon=True).start()
+    return HTTPStatus.OK, {"ok": True, "running": True}
+
+
+def handle_pipeline_stop_request() -> tuple[int, dict[str, Any]]:
+    pipeline_cancel_event.set()
+    if pipeline_snapshot().get("running"):
+        pipeline_set(stop_requested=True)
+    return HTTPStatus.OK, {"ok": True}
+
+
+def exit_service_statuses() -> list[dict[str, Any]]:
+    singbox = exit_status_copy("singbox")
+    global_ = exit_status_copy("global")
+    if singbox.get("supported"):
+        singbox_details = "已接管" if singbox.get("applied") else ("已开启但未生效" if singbox.get("enabled") else "已关闭")
+        if singbox.get("service_active") is False:
+            singbox_details += "，sing-box 服务未运行"
+    else:
+        singbox_details = singbox.get("unsupported_reason") or "当前环境不支持"
+    if global_.get("supported"):
+        if global_.get("applied"):
+            iface = global_.get("physical_interface") or "?"
+            ips = ", ".join(global_.get("physical_ips") or []) or "?"
+            global_details = f"已接管（物理网卡 {iface}，IP {ips}）"
+        else:
+            global_details = "已开启但未生效" if global_.get("enabled") else "已关闭（服务器直连出站）"
+    else:
+        global_details = global_.get("unsupported_reason") or "当前环境不支持"
+    return [
+        {
+            "name": "sing-box 出口接管",
+            "status": "running" if singbox.get("applied") else "stopped",
+            "details": singbox_details,
+            "error": singbox.get("last_error") or "",
+        },
+        {
+            "name": "全局出口接管",
+            "status": "running" if global_.get("applied") else "stopped",
+            "details": global_details,
+            "error": global_.get("last_error") or "",
+        },
+    ]
+
+
 class Handler(BaseHTTPRequestHandler):
     def get_secret_path(self) -> str:
         ui_cfg = load_ui_config()
@@ -7465,7 +7608,8 @@ class Handler(BaseHTTPRequestHandler):
                     openvpn_status,
                     collector_status,
                     checker_status,
-                    pinger_status
+                    pinger_status,
+                    *exit_service_statuses(),
                 ]
             })
         elif effective_path == "/api/logs":
@@ -7644,7 +7788,14 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_ip_type not in ("all", "residential", "hosting"):
                     self.send_json({"ok": False, "error": "无效的IP出站类型过滤"}, HTTPStatus.BAD_REQUEST)
                     return
-                
+                check_interval_hours = None
+                if payload.get("check_interval_hours") is not None:
+                    try:
+                        check_interval_hours = parse_check_interval_hours(payload.get("check_interval_hours"))
+                    except ValueError as exc:
+                        self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+
                 ui_cfg = load_ui_config()
                 expected_proxy_port = ui_cfg.get("proxy_port", 7928)
                 fixed_node_id = current_fixed_node_id(ui_cfg) if routing_mode == "fixed_ip" else ""
@@ -7664,11 +7815,17 @@ class Handler(BaseHTTPRequestHandler):
                     ui_cfg["fav_fail_fallback"] = False
                 if routing_mode == "fixed_ip":
                     ui_cfg["fixed_node_id"] = fixed_node_id
-                
+                interval_changed = False
+                if check_interval_hours is not None:
+                    interval_changed = check_interval_hours != bounded_int(ui_cfg.get("check_interval_hours"), 24, 1, 72)
+                    ui_cfg["check_interval_hours"] = check_interval_hours
+
                 auth_file = DATA_DIR / "ui_auth.json"
                 with lock:
                     DATA_DIR.mkdir(exist_ok=True, parents=True)
                     write_json(auth_file, ui_cfg)
+                if interval_changed:
+                    reschedule_after_interval_change()
 
                 policy_message = enforce_active_node_allowed_by_routing(ui_cfg, "路由设置已更新")
                 
@@ -7791,7 +7948,7 @@ class Handler(BaseHTTPRequestHandler):
                         "discovery_countries": discovery_countries,
                     })
                 else:
-                    threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
+                    threading.Thread(target=run_pipeline, args=("manual_update", False), daemon=True).start()
                     self.send_json({
                         "ok": True,
                         "message": "已在后台启动节点更新流程",
@@ -7814,6 +7971,9 @@ class Handler(BaseHTTPRequestHandler):
                 if len(node_ids) > MANUAL_TEST_NODE_LIMIT:
                     self.send_json({"ok": False, "error": f"单次最多测试 {MANUAL_TEST_NODE_LIMIT} 个节点"}, HTTPStatus.BAD_REQUEST)
                     return
+                if pipeline_snapshot().get("running"):
+                    self.send_json({"ok": False, "error": PIPELINE_BUSY_MESSAGE}, HTTPStatus.CONFLICT)
+                    return
                 if not maintenance_lock.acquire(blocking=False):
                     self.send_json({"ok": False, "error": "当前已有连接或节点维护任务正在运行，请稍后再试"}, HTTPStatus.CONFLICT)
                     return
@@ -7832,6 +7992,55 @@ class Handler(BaseHTTPRequestHandler):
                         is_connecting = False
                     set_state(is_connecting=False)
                     maintenance_lock.release()
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/singbox_exit":
+            try:
+                status_code, body = handle_singbox_exit_request(self.read_json_body())
+                self.send_json(body, HTTPStatus(status_code))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/singbox_exit/verify":
+            try:
+                self.read_request_body()
+                status_code, body = handle_singbox_verify_request()
+                self.send_json(body, HTTPStatus(status_code))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/global_exit":
+            try:
+                status_code, body = handle_global_exit_request(self.read_json_body())
+                self.send_json(body, HTTPStatus(status_code))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/speedtest/settings":
+            try:
+                status_code, body = handle_speedtest_settings_request(self.read_json_body())
+                self.send_json(body, HTTPStatus(status_code))
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/speedtest/estimate":
+            try:
+                status_code, body = handle_speedtest_estimate_request(self.read_json_body())
+                self.send_json(body, HTTPStatus(status_code))
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/pipeline/speedtest":
+            try:
+                self.read_request_body()
+                status_code, body = handle_pipeline_speedtest_request()
+                self.send_json(body, HTTPStatus(status_code))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/pipeline/stop":
+            try:
+                self.read_request_body()
+                status_code, body = handle_pipeline_stop_request()
+                self.send_json(body, HTTPStatus(status_code))
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/disconnect":
@@ -7870,6 +8079,9 @@ class Handler(BaseHTTPRequestHandler):
                 node_id = str(payload.get("id") or "")
                 if not node_id.strip():
                     self.send_json({"ok": False, "error": "节点 ID 不能为空"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if pipeline_snapshot().get("running"):
+                    self.send_json({"ok": False, "error": PIPELINE_BUSY_MESSAGE}, HTTPStatus.CONFLICT)
                     return
                 if not maintenance_lock.acquire(blocking=False):
                     self.send_json({"ok": False, "error": "当前已有连接或节点维护任务正在运行，请稍后再试"}, HTTPStatus.CONFLICT)
