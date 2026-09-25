@@ -91,6 +91,7 @@ class ManagerLogicTests(unittest.TestCase):
             mock.patch.object(manager, "API_CACHE_FILE", root / "api_snapshot.csv"),
             mock.patch.object(manager, "API_CACHE_META_FILE", root / "api_snapshot.meta.json"),
             mock.patch.object(manager, "BUNDLED_SNAPSHOT_FILE", root / "bundled_snapshot.csv"),
+            mock.patch.object(manager, "SPEED_HISTORY_FILE", root / "speed_history.json"),
             mock.patch.object(manager.vpn_utils, "DATA_DIR", root),
             mock.patch.object(manager.vpn_utils, "IP_CACHE_FILE", root / "ip_cache.json"),
         ]
@@ -2205,6 +2206,64 @@ class ManagerLogicTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no valid nodes"):
             snapshot_utils.parse_and_validate_snapshot(csv_text)
+
+    # ---- 测速历史存储（spec 3.1 / 3.2） ----
+
+    def test_append_speed_history_keeps_latest_ten_records(self) -> None:
+        for index in range(12):
+            manager.append_speed_history("node-a", {"t": 1700000000 + index, "mbps": index, "msg": "", "run_id": "r"})
+
+        history = manager.read_speed_history()
+        self.assertEqual(1, len(history))
+        records = history["node-a"]
+        self.assertEqual(10, len(records))
+        self.assertEqual(2, records[0]["t"] - 1700000000)
+        self.assertEqual(11, records[-1]["t"] - 1700000000)
+        on_disk = manager.read_json(manager.SPEED_HISTORY_FILE, {})
+        self.assertEqual(1, on_disk.get("version"))
+        self.assertEqual(10, len(on_disk["nodes"]["node-a"]))
+
+    def test_append_speed_history_prunes_oldest_node_entries(self) -> None:
+        total = manager.SPEED_HISTORY_MAX_NODES + 1
+        for index in range(total):
+            # node-0 最新记录最旧，应最先被淘汰
+            manager.append_speed_history(f"node-{index}", {"t": 1700000000 + index, "mbps": 1.0, "msg": "", "run_id": "r"})
+
+        history = manager.read_speed_history()
+        self.assertEqual(manager.SPEED_HISTORY_MAX_NODES, len(history))
+        self.assertNotIn("node-0", history)
+        self.assertIn(f"node-{total - 1}", history)
+
+    def test_append_speed_history_ignores_empty_node_id(self) -> None:
+        manager.append_speed_history("", {"t": 1, "mbps": 1.0, "msg": "", "run_id": "r"})
+        self.assertEqual({}, manager.read_speed_history())
+
+    def test_read_speed_history_tolerates_corrupt_file(self) -> None:
+        manager.SPEED_HISTORY_FILE.write_text("{not json", encoding="utf-8")
+        with mock.patch.object(manager, "log_to_json") as log_mock:
+            history = manager.read_speed_history()
+        self.assertEqual({}, history)
+        self.assertTrue(log_mock.called)
+
+        # 结构不对（根不是对象）同样当空记录
+        manager.SPEED_HISTORY_FILE.write_text("[1, 2, 3]", encoding="utf-8")
+        with mock.patch.object(manager, "log_to_json"):
+            self.assertEqual({}, manager.read_speed_history())
+
+    def test_append_speed_history_survives_write_failure(self) -> None:
+        with mock.patch.object(manager, "write_json", side_effect=OSError("disk full")), \
+                mock.patch.object(manager, "log_to_json") as log_mock:
+            manager.append_speed_history("node-a", {"t": 1, "mbps": 1.0, "msg": "", "run_id": "r"})
+        self.assertTrue(log_mock.called)
+        self.assertEqual({}, manager.read_speed_history())
+
+    def test_get_state_includes_speed_history(self) -> None:
+        manager.append_speed_history("node-a", {"t": 1700000000, "mbps": 42.5, "msg": "", "run_id": "r"})
+
+        state = manager.get_state()
+
+        self.assertIn("speed_history", state)
+        self.assertEqual(42.5, state["speed_history"]["node-a"][0]["mbps"])
 
 
 class ProxyServerConcurrencyTests(unittest.TestCase):

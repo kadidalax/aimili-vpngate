@@ -170,6 +170,9 @@ BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 API_CACHE_FILE = DATA_DIR / "api_snapshot.csv"
 API_CACHE_META_FILE = DATA_DIR / "api_snapshot.meta.json"
 BUNDLED_SNAPSHOT_FILE = ROOT_DIR / "mirror" / "vpngate.csv"
+SPEED_HISTORY_FILE = DATA_DIR / "speed_history.json"
+SPEED_HISTORY_PER_NODE = 10
+SPEED_HISTORY_MAX_NODES = 300
 WEB_LOG_MAX_ENTRIES = 500
 
 lock = threading.RLock()
@@ -326,6 +329,56 @@ def read_json(path: Path, default: Any) -> Any:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return default
+
+def read_speed_history() -> dict[str, list[dict[str, Any]]]:
+    """读取测速历史。文件缺失、损坏或结构不对一律当空记录，绝不抛异常。"""
+    try:
+        try:
+            raw: Any = json.loads(SPEED_HISTORY_FILE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError("speed history root is not an object")
+        nodes = raw.get("nodes", {})
+        if not isinstance(nodes, dict):
+            raise ValueError("speed history nodes is not an object")
+        cleaned: dict[str, list[dict[str, Any]]] = {}
+        for node_id, records in nodes.items():
+            if not isinstance(node_id, str) or not node_id or not isinstance(records, list):
+                continue
+            valid = [r for r in records if isinstance(r, dict)][-SPEED_HISTORY_PER_NODE:]
+            if valid:
+                cleaned[node_id] = valid
+        return cleaned
+    except Exception as exc:
+        log_to_json("WARN", "SpeedHistory", f"读取测速历史失败，按空记录处理: {exc}")
+        return {}
+
+def append_speed_history(node_id: str, record: dict[str, Any]) -> None:
+    """追加一条测速历史并原子落盘。任何异常只记 WARN，绝不影响测速流程。"""
+    if not node_id or not isinstance(record, dict):
+        return
+    try:
+        with lock:
+            data = read_speed_history()
+            records = list(data.get(node_id, []))
+            records.append(record)
+            data[node_id] = records[-SPEED_HISTORY_PER_NODE:]
+            if len(data) > SPEED_HISTORY_MAX_NODES:
+                def latest_ts(entries: list[dict[str, Any]]) -> float:
+                    try:
+                        return float(entries[-1].get("t") or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                for old_id in sorted(data, key=lambda key: latest_ts(data[key]))[: len(data) - SPEED_HISTORY_MAX_NODES]:
+                    if old_id != node_id:
+                        data.pop(old_id, None)
+            write_json(SPEED_HISTORY_FILE, {"version": 1, "nodes": data})
+    except Exception as exc:
+        log_to_json("WARN", "SpeedHistory", f"写入测速历史失败: {exc}")
+
+def speed_history_snapshot() -> dict[str, list[dict[str, Any]]]:
+    return read_speed_history()
 
 import hashlib
 
@@ -635,6 +688,7 @@ def get_state() -> dict[str, Any]:
     state.setdefault("next_check_at", 0)
     state["speedtest_settings"] = speedtest.normalize_settings(ui_cfg.get("speedtest"))
     state["pipeline"] = pipeline_snapshot()
+    state["speed_history"] = speed_history_snapshot()
     with lock:
         state["singbox_exit"] = dict(exit_status["singbox"])
         state["global_exit"] = dict(exit_status["global"])
