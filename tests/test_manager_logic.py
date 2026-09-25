@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import os
 import re
@@ -2001,6 +2002,32 @@ class ManagerLogicTests(unittest.TestCase):
         main_block = main_block[:main_block.index("}")]
         self.assertIn("padding: 24px 32px", main_block)
         self.assertNotIn("max-width", main_block)
+
+    def test_consume_skip_initial_run_is_one_time(self) -> None:
+        auth_file = manager.DATA_DIR / "ui_auth.json"
+        # 未记录答案（Docker/手动安装/历史升级）：不跳过，维持原有自动行为
+        self.assertFalse(manager.consume_skip_initial_run())
+        # install.sh 答 N：记录 true → 本次跳过并翻转持久化
+        manager.write_json(auth_file, {"skip_initial_run": True})
+        self.assertTrue(manager.consume_skip_initial_run())
+        stored = json.loads(auth_file.read_text(encoding="utf-8"))
+        self.assertFalse(stored["skip_initial_run"])
+        # 一次性消费：之后每次启动照常
+        self.assertFalse(manager.consume_skip_initial_run())
+        # 文件损坏或值非布尔 true → 不跳过
+        auth_file.write_text("{broken json", encoding="utf-8")
+        self.assertFalse(manager.consume_skip_initial_run())
+        manager.write_json(auth_file, {"skip_initial_run": "true"})
+        self.assertFalse(manager.consume_skip_initial_run())
+
+    def test_collector_loop_gates_first_auto_run(self) -> None:
+        src = inspect.getsource(manager.collector_loop)
+        # 每轮先消费一次性跳过标记，再决定是否跑管线
+        self.assertLess(src.index("consume_skip_initial_run()"), src.index("run_pipeline("))
+        # 跳过分支：纠正安装脚本预置的连接中状态，照常调度下一轮周期任务
+        self.assertIn("is_connecting=False", src)
+        self.assertIn("schedule_next_check()", src)
+        self.assertIn("wait_for_next_check()", src)
 
     def test_dashboard_contains_v220_controls(self) -> None:
         html = manager.INDEX_HTML

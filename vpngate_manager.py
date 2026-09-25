@@ -3419,10 +3419,40 @@ def run_cli(argv: list[str]) -> int:
     print(json.dumps({"ok": True, "status": result}, ensure_ascii=False, indent=2), flush=True)
     return 0
 
+def consume_skip_initial_run() -> bool:
+    """一次性消费安装时记录的"跳过首次自动拉取"选择。
+
+    install.sh 全新安装答 N 时在 ui_auth.json 写入 skip_initial_run=true；
+    缺少该键、值非布尔 true 或文件损坏均返回 False（Docker/手动安装与
+    历史升级没有记录，维持原有自动行为）。
+    """
+    auth_file = DATA_DIR / "ui_auth.json"
+    with lock:
+        try:
+            data = json.loads(auth_file.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict) or data.get("skip_initial_run") is not True:
+            return False
+        data["skip_initial_run"] = False
+        write_json(auth_file, data)
+    return True
+
+
 def collector_loop() -> None:
     global last_collector_heartbeat
     while True:
         last_collector_heartbeat = time.time()
+        if consume_skip_initial_run():
+            msg = "已按安装时的选择跳过首次自动拉取，周期任务照常执行"
+            print(f"[守护线程] {msg}", flush=True)
+            log_to_json("INFO", "Main", msg)
+            # install.sh 重启前会在 state.json 预置 is_connecting=True 等待首连，
+            # 首跑被跳过时必须纠正，否则面板卡在"正在连接"且前端会拦截所有操作按钮。
+            set_state(is_connecting=False, last_check_message=msg)
+            schedule_next_check()
+            wait_for_next_check()
+            continue
         success = False
         try:
             print("[守护线程] 开始执行节点拉取与可用性检测周期任务...", flush=True)
