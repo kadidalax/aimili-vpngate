@@ -14,6 +14,8 @@ V2.2.0 基于上游 V2.1.5，新增出口接管与节点测速能力。更新来
 - API：新增 `/api/singbox_exit`、`/api/singbox_exit/verify`、`/api/global_exit`、`/api/speedtest/settings`、`/api/speedtest/estimate`、`/api/pipeline/speedtest`、`/api/pipeline/stop`；`/api/speedtest/settings` 接受 `check_interval_hours`（`/api/update_settings` 仍兼容）；`/api/gateway_status` 增加两项出口接管状态；管线运行期间 `/api/test_node` 与 `/api/test_nodes` 返回 409。
 - 命令行逃生口：`python3 vpngate_manager.py --global-exit off|on` 与 `--singbox-exit off|on`。
 - 打包：新增 `speedtest.py`、`singbox_exit.py`、`global_exit.py` 三个模块，Dockerfile 与发布压缩包同步收录。
+- “测当前筛选”按钮：工具栏新增独立测速入口，只对当前筛选出的节点直接测速，不获取新节点、不走重测时间窗、测完不切换节点；沿用测速弹窗的全部设置（单节点时长与流量上限、阈值停止、进度面板与停止按钮）；管线运行期间点击返回 409。
+- 测速历史：每个节点在 `vpngate_data/speed_history.json` 保留最近 10 次测速记录（全局最多 300 个节点，超出淘汰最旧），管线测速与“测当前筛选”都会写入；悬停节点表“实测速度”单元格弹出悬浮浮层，显示最好、平均、总次数与最近 10 条时间明细，不改变表格布局；历史文件损坏时按空记录处理，不影响测速。
 
 ## 已知边界
 
