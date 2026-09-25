@@ -1941,6 +1941,22 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn('${testBtn}', manager.INDEX_HTML)
         self.assertIn('${speedCellHtml(n)}', manager.INDEX_HTML)
 
+    def test_dashboard_contains_filtered_speedtest_and_history_popover(self) -> None:
+        html = manager.INDEX_HTML
+        for element_id in ("btn_speedtest_filtered", "app_toast", "speed_history_pop"):
+            self.assertIn(f'id="{element_id}"', html, element_id)
+        for text in (
+            "startFilteredSpeedtest", "showSpeedHistory", "hideSpeedHistory",
+            "speedHistoryOf", "speedHistoryStats", "showToast",
+            "./api/pipeline/speedtest_filtered", "实测速度历史",
+        ):
+            self.assertIn(text, html, text)
+        # 右对齐分组：margin-left:auto 从 #btn_speedtest 挪到新按钮
+        self.assertIn('id="btn_speedtest_filtered" class="toolbar-btn" type="button" onclick="startFilteredSpeedtest()" style="margin-left: auto;', html)
+        self.assertNotIn('id="btn_speedtest" class="toolbar-btn" type="button" onclick="openSpeedtestModal()" style="margin-left: auto;', html)
+        # 浮层不占文档流
+        self.assertIn('id="speed_history_pop" style="position: fixed; display: none;', html)
+
     def test_dashboard_contains_v220_controls(self) -> None:
         html = manager.INDEX_HTML
         for element_id in (

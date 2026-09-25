@@ -5094,7 +5094,13 @@ INDEX_HTML = r"""<!doctype html>
       <option value="default">默认排序</option>
       <option value="speed">按实测速度</option>
     </select>
-    <button id="btn_speedtest" class="toolbar-btn" type="button" onclick="openSpeedtestModal()" style="margin-left: auto; height: 42px; gap: 6px;">
+    <button id="btn_speedtest_filtered" class="toolbar-btn" type="button" onclick="startFilteredSpeedtest()" style="margin-left: auto; height: 42px; gap: 6px;">
+      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+      </svg>
+      测当前筛选
+    </button>
+    <button id="btn_speedtest" class="toolbar-btn" type="button" onclick="openSpeedtestModal()" style="height: 42px; gap: 6px;">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
       </svg>
@@ -6934,6 +6940,87 @@ function formatSpeed(mbps) {
   return `${value.toFixed(2)} MB/s`;
 }
 
+let toastTimer = null;
+function showToast(msg) {
+  const el = $("app_toast");
+  if (!el) return;
+  el.textContent = String(msg || "");
+  el.style.display = "block";
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.style.display = "none"; toastTimer = null; }, 2400);
+}
+
+async function startFilteredSpeedtest() {
+  const ids = getFilteredNodes().map(n => n && n.id).filter(Boolean);
+  if (!ids.length) {
+    showToast("当前筛选没有节点");
+    return;
+  }
+  try {
+    const response = await fetchWithTimeout("./api/pipeline/speedtest_filtered", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids })
+    }, 15000);
+    const result = await readJsonResponse(response, "启动测速失败");
+    if (!response.ok || !result.ok) throw new Error(result.error || "启动测速失败");
+    showToast(`开始测速 ${ids.length} 个筛选节点`);
+    startRefreshPolling();
+  } catch (e) {
+    showToast(e.message || "启动测速失败");
+  }
+}
+
+function speedHistoryOf(id) {
+  const history = (state && state.speed_history) || {};
+  const rows = history[id];
+  return Array.isArray(rows) ? rows : [];
+}
+
+function speedHistoryStats(rows) {
+  const speeds = rows.map(r => Number(r && r.mbps)).filter(v => Number.isFinite(v) && v > 0);
+  if (!speeds.length) return { best: 0, avg: 0 };
+  const best = Math.max(...speeds);
+  return { best, avg: speeds.reduce((a, b) => a + b, 0) / speeds.length };
+}
+
+function hideSpeedHistory() {
+  const pop = $("speed_history_pop");
+  if (pop) pop.style.display = "none";
+}
+
+function showSpeedHistory(anchor, id) {
+  const pop = $("speed_history_pop");
+  if (!pop || !anchor) return;
+  const rows = speedHistoryOf(id);
+  if (!rows.length) return;
+  const { best, avg } = speedHistoryStats(rows);
+  const newestFirst = rows.slice(-10).reverse();
+  const pad = v => String(v).padStart(2, "0");
+  const lines = newestFirst.map(r => {
+    const when = r.t ? new Date(Number(r.t) * 1000) : null;
+    const stamp = when && Number.isFinite(when.getTime())
+      ? `${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}`
+      : "未知时间";
+    const mbps = Number(r.mbps);
+    const speed = Number.isFinite(mbps) && mbps > 0 ? `${mbps.toFixed(2)} MB/s` : "-";
+    return `<div style="display:flex; justify-content:space-between; gap:14px; white-space:nowrap;"><span style="color: var(--text-secondary);">${stamp}</span><span class="mono">${speed}</span></div>`;
+  }).join("");
+  pop.innerHTML =
+    `<div style="font-weight:600; margin-bottom:4px;">实测速度历史</div>` +
+    `<div style="color: var(--text-secondary); margin-bottom:6px;">最好 ${best ? best.toFixed(2) + " MB/s" : "-"} · 平均 ${avg ? avg.toFixed(2) + " MB/s" : "-"} · 共 ${rows.length} 次</div>` +
+    `<div style="border-top: 1px solid var(--border-color); padding-top: 6px; display:flex; flex-direction:column; gap:3px;">${lines}</div>`;
+  pop.style.display = "block";
+  const rect = anchor.getBoundingClientRect();
+  const popRect = pop.getBoundingClientRect();
+  let left = rect.right + 8;
+  let top = rect.top;
+  if (left + popRect.width > window.innerWidth - 8) left = Math.max(8, rect.left - popRect.width - 8);
+  if (top + popRect.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - popRect.height - 8);
+  pop.style.left = `${Math.max(8, left)}px`;
+  pop.style.top = `${Math.max(8, top)}px`;
+}
+
 function speedCellHtml(n) {
   if (!n) return "-";
   const pipeline = state.pipeline || {};
@@ -6947,7 +7034,15 @@ function speedCellHtml(n) {
   const parts = [`${(value * 8).toFixed(1)} Mbps`];
   if (n.speed_message) parts.push(String(n.speed_message));
   if (n.speed_tested_at) parts.push("测速时间：" + new Date(Number(n.speed_tested_at) * 1000).toLocaleString());
-  return `<span class="mono" title="${esc(parts.join("；"))}">${esc(formatSpeed(value))}</span>`;
+  const historyRows = speedHistoryOf(n.id);
+  if (historyRows.length) {
+    const { best, avg } = speedHistoryStats(historyRows);
+    parts.push(`历史最好 ${best ? best.toFixed(2) : "-"} MB/s / 平均 ${avg ? avg.toFixed(2) : "-"} MB/s（${historyRows.length} 次）`);
+  }
+  const historyAttrs = historyRows.length
+    ? ` onmouseenter="showSpeedHistory(this, '${esc(n.id)}')" onmouseleave="hideSpeedHistory()"`
+    : "";
+  return `<span class="mono" title="${esc(parts.join("；"))}"${historyAttrs}>${esc(formatSpeed(value))}</span>`;
 }
 
 function renderExitStatus() {
@@ -7643,6 +7738,8 @@ function enhanceNumberInputs(root) {
 }
 enhanceNumberInputs();
 </script>
+<div id="app_toast" style="position: fixed; top: 18px; left: 50%; transform: translateX(-50%); background: rgba(22, 30, 49, 0.98); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 18px; color: var(--text-primary); font-size: 13px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); display: none; z-index: 999; pointer-events: none; max-width: 80vw; text-align: center;"></div>
+<div id="speed_history_pop" style="position: fixed; display: none; background: rgba(22, 30, 49, 0.98); border: 1px solid var(--border-color); border-radius: 12px; padding: 10px 12px; color: var(--text-primary); font-size: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); z-index: 998; pointer-events: none; min-width: 190px; max-width: 260px;"></div>
 </body></html>"""
 
 def check_proxy_health() -> dict[str, Any]:
