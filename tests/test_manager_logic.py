@@ -2309,6 +2309,106 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn("speed_history", state)
         self.assertEqual(42.5, state["speed_history"]["node-a"][0]["mbps"])
 
+    # ---- 独立筛选测速（spec 4.1） ----
+
+    def test_filtered_speedtest_returns_409_when_busy(self) -> None:
+        with mock.patch.object(manager, "pipeline_snapshot", return_value={"running": True}):
+            status, body = manager.handle_pipeline_speedtest_filtered_request({"ids": ["node-0"]})
+        self.assertEqual(409, status)
+        self.assertFalse(body["ok"])
+        self.assertTrue(body["running"])
+
+        with mock.patch.object(manager, "pipeline_snapshot", return_value={"running": False}):
+            self.assertTrue(manager.maintenance_lock.acquire(blocking=False))
+            try:
+                status, body = manager.handle_pipeline_speedtest_filtered_request({"ids": ["node-0"]})
+            finally:
+                manager.maintenance_lock.release()
+        self.assertEqual(409, status)
+
+    def test_filtered_speedtest_rejects_bad_ids(self) -> None:
+        self.write_nodes(2)
+        for bad_ids in ([], ["ghost-1", "ghost-2"], "node-0", None, [""], 42):
+            with self.subTest(ids=bad_ids):
+                status, body = manager.handle_pipeline_speedtest_filtered_request({"ids": bad_ids})
+                self.assertEqual(400, status)
+                self.assertFalse(body["ok"])
+
+    def test_filtered_speedtest_builds_candidates_from_ids_without_fetch(self) -> None:
+        self.write_nodes(4)
+
+        with (
+            mock.patch.object(manager, "fetch_candidates") as fetch,
+            mock.patch.object(manager.speedtest, "select_candidates") as select,
+            mock.patch.object(manager, "run_filtered_speedtest") as runner,
+        ):
+            status, body = manager.handle_pipeline_speedtest_filtered_request(
+                {"ids": ["node-3", "node-0", "node-0"]}
+            )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        fetch.assert_not_called()
+        select.assert_not_called()
+        runner.assert_called_once()
+        ids, candidates = runner.call_args.args
+        self.assertEqual(["node-3", "node-0"], ids)
+        self.assertEqual(["node-3", "node-0"], [c["id"] for c in candidates])
+
+    def test_run_filtered_speedtest_runs_speed_stage_only(self) -> None:
+        self.write_nodes(3)
+        candidates = manager.read_nodes()
+        manager.pipeline_cancel_event.clear()
+
+        with (
+            mock.patch.object(manager, "run_speed_stage", return_value="") as stage,
+            mock.patch.object(manager, "fetch_candidates") as fetch,
+            mock.patch.object(manager.speedtest, "select_candidates") as select,
+            mock.patch.object(manager, "maybe_switch_to_fastest") as switch,
+            mock.patch.object(manager, "run_pipeline") as pipeline,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.run_filtered_speedtest(["node-0", "node-1"], candidates[:2])
+
+        stage.assert_called_once()
+        staged_ids = [c["id"] for c in stage.call_args.args[0]]
+        self.assertEqual(["node-0", "node-1"], staged_ids)
+        self.assertEqual("filtered_speedtest", stage.call_args.args[2])
+        fetch.assert_not_called()
+        select.assert_not_called()
+        switch.assert_not_called()
+        pipeline.assert_not_called()
+        snapshot = manager.pipeline_snapshot()
+        self.assertFalse(snapshot["running"])
+        self.assertEqual("idle", snapshot["stage"])
+        self.assertFalse(manager.is_connecting)
+        self.assertFalse(manager.maintenance_lock.locked())
+
+    def test_run_filtered_speedtest_releases_lock_on_stage_error(self) -> None:
+        candidates = self.write_nodes(1)
+
+        with (
+            mock.patch.object(manager, "run_speed_stage", side_effect=RuntimeError("boom")),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.run_filtered_speedtest(["node-0"], candidates)
+
+        snapshot = manager.pipeline_snapshot()
+        self.assertFalse(snapshot["running"])
+        self.assertEqual("error", snapshot["stopped_reason"])
+        self.assertFalse(manager.is_connecting)
+        self.assertFalse(manager.maintenance_lock.locked())
+
+    def test_run_filtered_speedtest_returns_busy_without_leaking_lock(self) -> None:
+        self.assertTrue(manager.maintenance_lock.acquire(blocking=False))
+        try:
+            with mock.patch.object(manager, "run_speed_stage") as stage:
+                manager.run_filtered_speedtest(["node-0"], [])
+        finally:
+            manager.maintenance_lock.release()
+        stage.assert_not_called()
+        self.assertFalse(manager.is_connecting)
+
 
 class ProxyServerConcurrencyTests(unittest.TestCase):
     def test_socks5_rejects_client_without_no_auth_method(self) -> None:

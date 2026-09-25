@@ -8001,6 +8001,92 @@ def handle_pipeline_speedtest_request() -> tuple[int, dict[str, Any]]:
     return HTTPStatus.OK, {"ok": True, "running": True}
 
 
+FILTERED_SPEEDTEST_NODE_LIMIT = 500
+
+
+def match_nodes_by_ids(raw_ids: Any) -> tuple[list[str], list[dict[str, Any]]]:
+    """清洗传入的节点 id 列表，并按该顺序从 nodes.json 匹配出候选。返回 (清洗后 ids, 候选)。"""
+    if not isinstance(raw_ids, list):
+        raise ValueError("节点 ID 列表无效")
+    ids: list[str] = []
+    for node_id in raw_ids:
+        node_id = str(node_id or "").strip()
+        if node_id and node_id not in ids:
+            ids.append(node_id)
+    ids = ids[:FILTERED_SPEEDTEST_NODE_LIMIT]
+    if not ids:
+        raise ValueError("没有可测速的节点")
+    wanted = set(ids)
+    with lock:
+        found = {str(n.get("id") or ""): n for n in read_nodes()}
+    candidates = [found[node_id] for node_id in ids if node_id in found]
+    if not candidates:
+        raise ValueError("指定的节点都不存在，请先刷新节点列表")
+    return ids, candidates
+
+
+def handle_pipeline_speedtest_filtered_request(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    if maintenance_lock.locked() or pipeline_snapshot().get("running"):
+        return HTTPStatus.CONFLICT, {"ok": False, "error": PIPELINE_BUSY_MESSAGE, "running": True}
+    try:
+        ids, candidates = match_nodes_by_ids(payload.get("ids"))
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    threading.Thread(target=run_filtered_speedtest, args=(ids, candidates), daemon=True).start()
+    return HTTPStatus.OK, {"ok": True, "running": True, "total": len(candidates)}
+
+
+def run_filtered_speedtest(ids: list[str], candidates: list[dict[str, Any]]) -> None:
+    """只测调用方指定的筛选节点：不 fetch、不 select、不切换，只跑 run_speed_stage。"""
+    global is_connecting, last_pipeline_end
+    ensure_dirs()
+    if not maintenance_lock.acquire(blocking=False):
+        set_state(last_check_message="任务进行中，请稍后再试")
+        return
+    with lock:
+        if is_connecting:
+            maintenance_lock.release()
+            set_state(last_check_message="当前已有连接或节点测试任务正在运行，请稍后再试")
+            return
+        is_connecting = True
+    run_id = "filtered_speedtest"
+    pipeline_cancel_event.clear()
+    with lock:
+        pipeline_status.update(new_pipeline_status())
+        pipeline_status.update(
+            running=True,
+            run_id=run_id,
+            trigger="manual_speedtest",
+            stage="speedtest",
+            with_speedtest=True,
+            started_at=time.time(),
+            message=f"准备测速 {len(candidates)} 个筛选节点...",
+        )
+    log_to_json("INFO", "SpeedTest", f"筛选测速开始: {len(candidates)} 个节点 run_id={run_id}")
+    settings = speedtest.normalize_settings(load_ui_config().get("speedtest"))
+    try:
+        with lock:
+            current = {str(n.get("id") or ""): n for n in read_nodes()}
+        live = [current[node_id] for node_id in ids if node_id in current] or candidates
+        set_state(is_connecting=True, last_check_message=f"正在测速 {len(live)} 个筛选节点...")
+        stopped = run_speed_stage(live, settings, run_id)
+        if stopped == "manual":
+            set_state(last_check_message="任务已手动停止")
+        else:
+            done = pipeline_snapshot().get("speed_done", 0)
+            suffix = "，达到阈值提前停止" if stopped == "threshold" else ""
+            set_state(last_check_message=f"筛选测速完成，共 {done} 个节点{suffix}")
+    except Exception as exc:
+        pipeline_set(stopped_reason="error", message=str(exc))
+        log_to_json("ERROR", "SpeedTest", f"筛选测速异常终止: {exc}")
+    finally:
+        is_connecting = False
+        last_pipeline_end = time.time()
+        pipeline_set(running=False, stage="idle", current_node_id="", finished_at=last_pipeline_end)
+        set_state(is_connecting=False)
+        maintenance_lock.release()
+
+
 def handle_pipeline_stop_request() -> tuple[int, dict[str, Any]]:
     pipeline_cancel_event.set()
     if pipeline_snapshot().get("running"):
@@ -8708,6 +8794,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.read_request_body()
                 status_code, body = handle_pipeline_speedtest_request()
+                self.send_json(body, HTTPStatus(status_code))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/pipeline/speedtest_filtered":
+            try:
+                payload = self.read_json_body()
+                if not isinstance(payload, dict):
+                    payload = {}
+                status_code, body = handle_pipeline_speedtest_filtered_request(payload)
                 self.send_json(body, HTTPStatus(status_code))
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
