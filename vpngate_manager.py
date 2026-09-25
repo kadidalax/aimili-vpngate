@@ -3897,8 +3897,6 @@ INDEX_HTML = r"""<!doctype html>
 
     main {
       padding: 24px 32px;
-      max-width: 1400px;
-      margin: 0 auto;
     }
 
     .active-card {

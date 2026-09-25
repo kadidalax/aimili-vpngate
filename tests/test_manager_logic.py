@@ -1982,6 +1982,15 @@ class ManagerLogicTests(unittest.TestCase):
         # 任务进行中本地拦截提示（后端 409 兜底竞态）
         self.assertIn("已有任务进行中", fn_body)
 
+    def test_main_layout_is_full_width(self) -> None:
+        html = manager.INDEX_HTML
+        # 页面不再 1400px 限宽居中，内容铺满视口；左右内边距保留
+        self.assertNotIn("max-width: 1400px", html)
+        main_block = html[html.index("    main {"):]
+        main_block = main_block[:main_block.index("}")]
+        self.assertIn("padding: 24px 32px", main_block)
+        self.assertNotIn("max-width", main_block)
+
     def test_dashboard_contains_v220_controls(self) -> None:
         html = manager.INDEX_HTML
         for element_id in (
