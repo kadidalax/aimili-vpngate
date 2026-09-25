@@ -988,17 +988,8 @@ if [ ! -f "$AUTH_FILE" ]; then
     if [ -t 0 ] && [ "${AIMILIVPN_NONINTERACTIVE:-0}" != "1" ]; then
         echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/安全后缀/登录账号密码）？${PLAIN}"
         read -p "是否自定义配置？[y/N]: " is_custom
-        echo -e "\n${YELLOW}服务启动后将自动拉取新节点并进行首次连接。${PLAIN}"
-        read -p "是否执行该自动流程？[y/N]: " first_auto_input
-        if [[ "$first_auto_input" =~ ^[Yy]$ ]]; then
-            FIRST_AUTO_RUN="asked_y"
-        else
-            FIRST_AUTO_RUN="asked_n"
-        fi
     else
         echo -e "\n${YELLOW}检测到是非交互式/无TTY环境安装，已自动跳过网页端参数自定义配置，采用默认随机参数部署。${PLAIN}"
-        echo -e "${YELLOW}未询问首次自动流程，按默认（自动执行）部署。${PLAIN}"
-        FIRST_AUTO_RUN="no_ask"
     fi
     
     # Initialize defaults
@@ -1074,6 +1065,20 @@ while True:
                 echo -e "${RED}输入错误: 密码长度不能少于 4 位！${PLAIN}"
             fi
         done
+    fi
+
+    # 首次自动流程询问：放在自定义配置（含密码输入）之后；不自定义配置时紧接此询问。
+    if [ -t 0 ] && [ "${AIMILIVPN_NONINTERACTIVE:-0}" != "1" ]; then
+        echo -e "\n${YELLOW}服务启动后将自动拉取新节点并进行首次连接。${PLAIN}"
+        read -p "是否执行该自动流程？[y/N]: " first_auto_input
+        if [[ "$first_auto_input" =~ ^[Yy]$ ]]; then
+            FIRST_AUTO_RUN="asked_y"
+        else
+            FIRST_AUTO_RUN="asked_n"
+        fi
+    else
+        echo -e "${YELLOW}未询问首次自动流程，按默认（自动执行）部署。${PLAIN}"
+        FIRST_AUTO_RUN="no_ask"
     fi
 
     # Write config JSON. Values are passed as argv to avoid breaking Python code

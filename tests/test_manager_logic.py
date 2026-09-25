@@ -2187,6 +2187,12 @@ class ManagerLogicTests(unittest.TestCase):
         # 答 N 时跳过启动后 90 秒的首连等待轮询，避免误报"加载超时"
         self.assertIn('if [ "$FIRST_AUTO_RUN" = "asked_n" ]; then', install_text)
         self.assertIn("已按你的选择跳过首次自动拉取", install_text)
+        # 询问位于自定义配置（含密码输入）之后；不自定义时紧接该询问，且须在写入配置前完成
+        ask_at = install_text.index('read -p "是否执行该自动流程？[y/N]: " first_auto_input')
+        password_at = install_text.index('read -p "请输入登录密码')
+        write_at = install_text.index('"$UI_PASSWORD" "$FIRST_AUTO_RUN" <<\'PY\'')
+        self.assertGreater(ask_at, password_at)
+        self.assertLess(ask_at, write_at)
 
     def test_openvpn_command_requires_server_certificate_usage(self) -> None:
         with mock.patch.object(manager, "get_openvpn_version", return_value=2.5):
