@@ -1933,8 +1933,19 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn("保留 0 个", state["last_fetch_message"])
 
     def test_node_table_contains_latency_country_panel_and_test_action(self) -> None:
-        self.assertIn('<th style="width: 125px;">延迟</th>', manager.INDEX_HTML)
-        self.assertIn('<th style="width: 130px;">实测速度</th>', manager.INDEX_HTML)
+        # 列宽按实测内容设置：状态/IP/延迟/速度/IP类型收窄，操作列容纳 4 个按钮
+        self.assertIn('<th style="width: 72px;">状态</th>', manager.INDEX_HTML)
+        self.assertIn('<th style="width: 195px;">IP 地址 : 端口</th>', manager.INDEX_HTML)
+        self.assertIn('<th style="width: 90px;">延迟</th>', manager.INDEX_HTML)
+        self.assertIn('<th style="width: 90px;">实测速度</th>', manager.INDEX_HTML)
+        self.assertIn('<th style="width: 80px;">IP 类型</th>', manager.INDEX_HTML)
+        # 物理位置与运营主体保持 auto（无 width），吸收全宽后的剩余空间；窄屏滚动保底
+        self.assertIn("<th>物理位置</th>", manager.INDEX_HTML)
+        self.assertIn("<th>运营主体 / ISP</th>", manager.INDEX_HTML)
+        self.assertIn("min-width: 1180px", manager.INDEX_HTML)
+        # 行内 max-width 残留清理（列宽统一由 th 决定）
+        self.assertNotIn("max-width: 220px", manager.INDEX_HTML)
+        self.assertNotIn("max-width: 110px", manager.INDEX_HTML)
         self.assertIn('colspan="8"', manager.INDEX_HTML)
         self.assertNotIn('colspan="7"', manager.INDEX_HTML)
         self.assertIn('class="country-option-input"', manager.INDEX_HTML)
