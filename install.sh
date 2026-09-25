@@ -988,8 +988,17 @@ if [ ! -f "$AUTH_FILE" ]; then
     if [ -t 0 ] && [ "${AIMILIVPN_NONINTERACTIVE:-0}" != "1" ]; then
         echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/安全后缀/登录账号密码）？${PLAIN}"
         read -p "是否自定义配置？[y/N]: " is_custom
+        echo -e "\n${YELLOW}服务启动后将自动拉取新节点并进行首次连接。${PLAIN}"
+        read -p "是否执行该自动流程？[y/N]: " first_auto_input
+        if [[ "$first_auto_input" =~ ^[Yy]$ ]]; then
+            FIRST_AUTO_RUN="asked_y"
+        else
+            FIRST_AUTO_RUN="asked_n"
+        fi
     else
         echo -e "\n${YELLOW}检测到是非交互式/无TTY环境安装，已自动跳过网页端参数自定义配置，采用默认随机参数部署。${PLAIN}"
+        echo -e "${YELLOW}未询问首次自动流程，按默认（自动执行）部署。${PLAIN}"
+        FIRST_AUTO_RUN="no_ask"
     fi
     
     # Initialize defaults
@@ -1069,12 +1078,12 @@ while True:
 
     # Write config JSON. Values are passed as argv to avoid breaking Python code
     # when username/password contain quotes, backslashes, or shell metacharacters.
-    python3 - "$AUTH_FILE" "$UI_PORT" "$SECRET_PATH" "$UI_USERNAME" "$UI_PASSWORD" <<'PY'
+    python3 - "$AUTH_FILE" "$UI_PORT" "$SECRET_PATH" "$UI_USERNAME" "$UI_PASSWORD" "$FIRST_AUTO_RUN" <<'PY'
 import json
 import os
 import sys
 
-auth_file, ui_port, secret_path, username, password = sys.argv[1:6]
+auth_file, ui_port, secret_path, username, password, first_auto_run = sys.argv[1:7]
 cfg = {
     "host": "::",
     "port": int(ui_port),
@@ -1083,6 +1092,8 @@ cfg = {
     "username": username,
     "password": password,
 }
+if first_auto_run == "asked_n":
+    cfg["skip_initial_run"] = True
 fd = os.open(auth_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -1145,6 +1156,9 @@ elif command -v rc-service >/dev/null 2>&1; then
 fi
 
 # Wait and poll for node loading and active connection
+if [ "$FIRST_AUTO_RUN" = "asked_n" ]; then
+    echo -e "\n${GREEN}已按你的选择跳过首次自动拉取与连接${PLAIN}：服务已启动，可稍后在面板手动触发，周期任务将照常执行。"
+else
 echo -e "\n正在等待 AimiliVPN 首次获取节点并建立加密通道 (此过程可能需要 5-90 秒)..."
 ACTIVE_ID=""
 LAST_MSG=""
@@ -1177,6 +1191,7 @@ for i in {1..90}; do
 done
 if [ -z "$ACTIVE_ID" ]; then
     echo -e "  -> ${YELLOW}[加载超时]${PLAIN} 首次节点获取或连接超时，将在后台继续尝试..."
+fi
 fi
 
 SECRET_PATH="EJsW2EeBo9lY"

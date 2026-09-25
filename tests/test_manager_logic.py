@@ -2171,6 +2171,23 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn('/etc/sysctl.d/99-aimilivpn.conf', install_text)
         self.assertNotIn('http://[::1]:${PROXY_PORT}', install_text)
 
+    def test_installer_asks_before_first_auto_run(self) -> None:
+        install_text = (manager.ROOT_DIR / "install.sh").read_text(encoding="utf-8")
+
+        # 仅全新安装块内询问；TTY 守卫复用既有条件，非交互式/升级安装不询问不记录
+        self.assertIn('if [ ! -f "$AUTH_FILE" ]; then', install_text)
+        self.assertIn('if [ -t 0 ] && [ "${AIMILIVPN_NONINTERACTIVE:-0}" != "1" ]; then', install_text)
+        self.assertIn("是否执行该自动流程？[y/N]: ", install_text)
+        self.assertIn('FIRST_AUTO_RUN="no_ask"', install_text)
+        self.assertIn('FIRST_AUTO_RUN="asked_n"', install_text)
+        # 答 N 时写入 skip_initial_run，供服务端一次性消费；答 Y 不记录
+        self.assertIn('"$FIRST_AUTO_RUN"', install_text)
+        self.assertIn('if first_auto_run == "asked_n":', install_text)
+        self.assertIn('cfg["skip_initial_run"] = True', install_text)
+        # 答 N 时跳过启动后 90 秒的首连等待轮询，避免误报"加载超时"
+        self.assertIn('if [ "$FIRST_AUTO_RUN" = "asked_n" ]; then', install_text)
+        self.assertIn("已按你的选择跳过首次自动拉取", install_text)
+
     def test_openvpn_command_requires_server_certificate_usage(self) -> None:
         with mock.patch.object(manager, "get_openvpn_version", return_value=2.5):
             command = manager.openvpn_command("node.ovpn", route_nopull=True)
