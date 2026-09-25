@@ -1967,6 +1967,21 @@ class ManagerLogicTests(unittest.TestCase):
         fn_body = html[html.index("async function startFilteredSpeedtest"):html.index("function speedHistoryOf")]
         self.assertIn("Number(result.total)", fn_body)
 
+    def test_node_row_has_single_speedtest_action(self) -> None:
+        html = manager.INDEX_HTML
+        self.assertIn("async function speedtestNode(", html)
+        self.assertIn('${speedBtn}', html)
+        self.assertIn('onclick="speedtestNode(', html)
+        # 操作列要装下第 4 个按钮（检测/测速/收藏/切换）
+        self.assertIn('<th style="width: 270px;">操作</th>', html)
+        # 单节点测速复用筛选测速端点，只传该节点 id，不改后端
+        fn_body = html[html.index("async function speedtestNode"):html.index("function speedHistoryOf")]
+        self.assertIn("./api/pipeline/speedtest_filtered", fn_body)
+        self.assertIn("JSON.stringify({ ids: [id] })", fn_body)
+        self.assertIn("startRefreshPolling()", fn_body)
+        # 任务进行中本地拦截提示（后端 409 兜底竞态）
+        self.assertIn("已有任务进行中", fn_body)
+
     def test_dashboard_contains_v220_controls(self) -> None:
         html = manager.INDEX_HTML
         for element_id in (

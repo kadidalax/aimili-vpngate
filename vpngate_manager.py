@@ -5157,7 +5157,7 @@ INDEX_HTML = r"""<!doctype html>
             <th>物理位置</th>
             <th>运营主体 / ISP</th>
             <th style="width: 110px;">IP 类型</th>
-            <th style="width: 230px;">操作</th>
+            <th style="width: 270px;">操作</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -6158,6 +6158,9 @@ function render(){
         ? `<button class="test-btn" ${favoriteBusy ? "disabled" : ""} style="color: var(--warning); border-color: rgba(245, 158, 11, 0.4); padding: 0 8px; height: 30px;" onclick="toggleFavorite('${esc(n.id)}', event)">${favoriteBusy ? "处理中" : "★ 已收藏"}</button>`
         : `<button class="test-btn" ${favoriteBusy ? "disabled" : ""} style="color: var(--text-secondary); border-color: var(--border-color); padding: 0 8px; height: 30px;" onclick="toggleFavorite('${esc(n.id)}', event)">${favoriteBusy ? "处理中" : "☆ 收藏"}</button>`;
 
+      // 单节点测速：复用筛选测速端点，任务进行中由 speedtestNode 本地拦截提示
+      const speedBtn = `<button class="test-btn" data-node-id="${esc(n.id)}" style="color: var(--warning); border-color: rgba(245, 158, 11, 0.4); padding: 0 8px; height: 30px;" onclick="speedtestNode('${esc(n.id)}', event)">测速</button>`;
+
       return `<tr ${rowClass}>
         <td><span class="badge ${badgeClass}">${badgeText}</span></td>
         <td class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
@@ -6169,6 +6172,7 @@ function render(){
         <td>
           <div class="table-actions">
             ${testBtn}
+            ${speedBtn}
             ${favBtn}
             ${connectBtn}
           </div>
@@ -6972,6 +6976,29 @@ async function startFilteredSpeedtest() {
     if (!response.ok || !result.ok) throw new Error(result.error || "启动测速失败");
     const total = Number(result.total) || ids.length;
     showToast(`开始测速 ${total} 个筛选节点`);
+    startRefreshPolling();
+  } catch (e) {
+    showToast(e.message || "启动测速失败");
+  }
+}
+
+async function speedtestNode(id, event) {
+  if (event) event.stopPropagation();
+  if (!id) return;
+  const pipeline = (state && state.pipeline) || {};
+  if (pipeline.running || (state && state.is_connecting)) {
+    showToast("已有任务进行中，请稍后再试");
+    return;
+  }
+  try {
+    const response = await fetchWithTimeout("./api/pipeline/speedtest_filtered", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [id] })
+    }, 15000);
+    const result = await readJsonResponse(response, "启动测速失败");
+    if (!response.ok || !result.ok) throw new Error(result.error || "启动测速失败");
+    showToast("开始测速该节点");
     startRefreshPolling();
   } catch (e) {
     showToast(e.message || "启动测速失败");
