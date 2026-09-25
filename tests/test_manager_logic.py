@@ -1957,6 +1957,16 @@ class ManagerLogicTests(unittest.TestCase):
         # 浮层不占文档流
         self.assertIn('id="speed_history_pop" style="position: fixed; display: none;', html)
 
+    def test_speed_cell_shows_history_popover_without_current_speed(self) -> None:
+        html = manager.INDEX_HTML
+        cell_body = html[html.index("function speedCellHtml"):html.index("function renderExitStatus")]
+        # 最近一次测速失败（speed_mbps<=0）但留有历史的节点也必须能悬浮出历史
+        self.assertLess(cell_body.index("speedHistoryOf"), cell_body.index("value <= 0"))
+        self.assertIn('${historyAttrs}>-</span>', cell_body)
+        # toast 数使用服务端返回的 total（服务端按 500 截断，前端 ids 可能更长）
+        fn_body = html[html.index("async function startFilteredSpeedtest"):html.index("function speedHistoryOf")]
+        self.assertIn("Number(result.total)", fn_body)
+
     def test_dashboard_contains_v220_controls(self) -> None:
         html = manager.INDEX_HTML
         for element_id in (
@@ -2324,6 +2334,30 @@ class ManagerLogicTests(unittest.TestCase):
 
         self.assertIn("speed_history", state)
         self.assertEqual(42.5, state["speed_history"]["node-a"][0]["mbps"])
+
+    def test_set_state_does_not_persist_speed_history(self) -> None:
+        # 历史只存在 speed_history.json；state.json 不得复制一份（否则每次 set_state 都写几百 KB）
+        manager.append_speed_history("node-a", {"t": 1700000000, "mbps": 42.5, "msg": "", "run_id": "r"})
+
+        manager.set_state(last_check_message="ping")
+
+        self.assertIn("speed_history", manager.RUNTIME_STATE_KEYS)
+        persisted = json.loads(manager.STATE_FILE.read_text(encoding="utf-8"))
+        self.assertNotIn("speed_history", persisted)
+        # 前端仍能从 get_state 拿到历史
+        self.assertIn("speed_history", manager.get_state())
+
+    def test_append_speed_history_truncates_long_msg(self) -> None:
+        long_msg = "x" * (manager.SPEED_HISTORY_MSG_LIMIT + 100)
+        manager.append_speed_history("node-a", {"t": 1, "mbps": 1.0, "msg": long_msg, "run_id": "r"})
+
+        records = manager.read_speed_history()["node-a"]
+        self.assertEqual(manager.SPEED_HISTORY_MSG_LIMIT + 3, len(records[0]["msg"]))
+        self.assertTrue(records[0]["msg"].endswith("..."))
+
+        # 短消息原样保留
+        manager.append_speed_history("node-a", {"t": 2, "mbps": 1.0, "msg": "ok", "run_id": "r"})
+        self.assertEqual("ok", manager.read_speed_history()["node-a"][1]["msg"])
 
     # ---- 独立筛选测速（spec 4.1） ----
 

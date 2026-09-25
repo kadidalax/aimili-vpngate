@@ -173,6 +173,7 @@ BUNDLED_SNAPSHOT_FILE = ROOT_DIR / "mirror" / "vpngate.csv"
 SPEED_HISTORY_FILE = DATA_DIR / "speed_history.json"
 SPEED_HISTORY_PER_NODE = 10
 SPEED_HISTORY_MAX_NODES = 300
+SPEED_HISTORY_MSG_LIMIT = 160
 WEB_LOG_MAX_ENTRIES = 500
 
 lock = threading.RLock()
@@ -198,7 +199,7 @@ last_checker_heartbeat = 0.0
 
 PIPELINE_TRIGGERS = ("periodic", "manual_update", "manual_speedtest", "forced")
 PIPELINE_STAGES = ("idle", "fetch", "probe", "speedtest", "switch")
-RUNTIME_STATE_KEYS = ("pipeline", "singbox_exit", "global_exit", "speedtest_settings", "check_interval_hours")
+RUNTIME_STATE_KEYS = ("pipeline", "singbox_exit", "global_exit", "speedtest_settings", "check_interval_hours", "speed_history")
 
 def new_pipeline_status() -> dict[str, Any]:
     return {
@@ -334,7 +335,8 @@ def read_speed_history() -> dict[str, list[dict[str, Any]]]:
     """读取测速历史。文件缺失、损坏或结构不对一律当空记录，绝不抛异常。"""
     try:
         try:
-            raw: Any = json.loads(SPEED_HISTORY_FILE.read_text(encoding="utf-8"))
+            with lock:
+                raw: Any = json.loads(SPEED_HISTORY_FILE.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
         if not isinstance(raw, dict):
@@ -362,7 +364,11 @@ def append_speed_history(node_id: str, record: dict[str, Any]) -> None:
         with lock:
             data = read_speed_history()
             records = list(data.get(node_id, []))
-            records.append(record)
+            stored = dict(record)
+            msg = str(stored.get("msg") or "")
+            if len(msg) > SPEED_HISTORY_MSG_LIMIT:
+                stored["msg"] = msg[:SPEED_HISTORY_MSG_LIMIT] + "..."
+            records.append(stored)
             data[node_id] = records[-SPEED_HISTORY_PER_NODE:]
             if len(data) > SPEED_HISTORY_MAX_NODES:
                 def latest_ts(entries: list[dict[str, Any]]) -> float:
@@ -6964,7 +6970,8 @@ async function startFilteredSpeedtest() {
     }, 15000);
     const result = await readJsonResponse(response, "启动测速失败");
     if (!response.ok || !result.ok) throw new Error(result.error || "启动测速失败");
-    showToast(`开始测速 ${ids.length} 个筛选节点`);
+    const total = Number(result.total) || ids.length;
+    showToast(`开始测速 ${total} 个筛选节点`);
     startRefreshPolling();
   } catch (e) {
     showToast(e.message || "启动测速失败");
@@ -7027,21 +7034,28 @@ function speedCellHtml(n) {
   if (pipeline.running && pipeline.current_node_id && pipeline.current_node_id === n.id) {
     return '<span class="speed-testing"><span class="badge-pulse" style="background: var(--warning);"></span>测速中</span>';
   }
+  const historyRows = speedHistoryOf(n.id);
+  const historyAttrs = historyRows.length
+    ? ` onmouseenter="showSpeedHistory(this, '${esc(n.id)}')" onmouseleave="hideSpeedHistory()"`
+    : "";
+  const historyText = historyRows.length
+    ? (() => {
+        const { best, avg } = speedHistoryStats(historyRows);
+        return `历史最好 ${best ? best.toFixed(2) : "-"} MB/s / 平均 ${avg ? avg.toFixed(2) : "-"} MB/s（${historyRows.length} 次）`;
+      })()
+    : "";
   const value = Number(n.speed_mbps);
   if (!Number.isFinite(value) || value <= 0) {
-    return n.speed_message ? `<span title="${esc(n.speed_message)}">-</span>` : "-";
+    const parts = [];
+    if (n.speed_message) parts.push(String(n.speed_message));
+    if (historyText) parts.push(historyText);
+    if (!parts.length) return "-";
+    return `<span title="${esc(parts.join("；"))}"${historyAttrs}>-</span>`;
   }
   const parts = [`${(value * 8).toFixed(1)} Mbps`];
   if (n.speed_message) parts.push(String(n.speed_message));
   if (n.speed_tested_at) parts.push("测速时间：" + new Date(Number(n.speed_tested_at) * 1000).toLocaleString());
-  const historyRows = speedHistoryOf(n.id);
-  if (historyRows.length) {
-    const { best, avg } = speedHistoryStats(historyRows);
-    parts.push(`历史最好 ${best ? best.toFixed(2) : "-"} MB/s / 平均 ${avg ? avg.toFixed(2) : "-"} MB/s（${historyRows.length} 次）`);
-  }
-  const historyAttrs = historyRows.length
-    ? ` onmouseenter="showSpeedHistory(this, '${esc(n.id)}')" onmouseleave="hideSpeedHistory()"`
-    : "";
+  if (historyText) parts.push(historyText);
   return `<span class="mono" title="${esc(parts.join("；"))}"${historyAttrs}>${esc(formatSpeed(value))}</span>`;
 }
 
@@ -8113,7 +8127,6 @@ def match_nodes_by_ids(raw_ids: Any) -> tuple[list[str], list[dict[str, Any]]]:
     ids = ids[:FILTERED_SPEEDTEST_NODE_LIMIT]
     if not ids:
         raise ValueError("没有可测速的节点")
-    wanted = set(ids)
     with lock:
         found = {str(n.get("id") or ""): n for n in read_nodes()}
     candidates = [found[node_id] for node_id in ids if node_id in found]
@@ -8897,10 +8910,10 @@ class Handler(BaseHTTPRequestHandler):
         elif effective_path == "/api/pipeline/speedtest_filtered":
             try:
                 payload = self.read_json_body()
-                if not isinstance(payload, dict):
-                    payload = {}
                 status_code, body = handle_pipeline_speedtest_filtered_request(payload)
                 self.send_json(body, HTTPStatus(status_code))
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/pipeline/stop":
