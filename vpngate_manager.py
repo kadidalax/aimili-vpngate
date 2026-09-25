@@ -3144,6 +3144,15 @@ def run_speed_stage(candidates: list[dict[str, Any]], settings: dict[str, Any], 
                     item.update(result)
                     break
             write_json(NODES_FILE, sort_all_nodes(nodes))
+            try:
+                append_speed_history(node_id, {
+                    "t": int(parse_float(result.get("speed_tested_at")) or time.time()),
+                    "mbps": parse_float(result.get("speed_mbps")),
+                    "msg": str(result.get("speed_message") or ""),
+                    "run_id": str(result.get("speed_run_id") or run_id),
+                })
+            except Exception as exc:
+                log_to_json("WARN", "SpeedHistory", f"测速历史写入失败（不影响测速）: {exc}")
         done += 1
         speed = parse_float(result.get("speed_mbps"))
         if speed > best_speed:

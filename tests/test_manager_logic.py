@@ -936,6 +936,50 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual(5.0, stored["node-1"]["speed_mbps"])
         self.assertNotIn("speed_mbps", stored["node-2"])
 
+    # ---- 测速历史写入钩子（spec 5.1） ----
+
+    def test_speed_stage_appends_history_for_each_node(self) -> None:
+        candidates = self.write_nodes(3)
+
+        def fake_measure(node, settings, run_id):
+            return {"id": node["id"], "speed_mbps": 3.5, "speed_tested_at": 1700000000.0,
+                    "speed_message": "ok", "speed_run_id": run_id}
+
+        manager.pipeline_cancel_event.clear()
+        with mock.patch.object(manager, "measure_node_speed", side_effect=fake_measure), \
+                mock.patch.object(manager, "log_to_json"):
+            reason = manager.run_speed_stage(candidates, {"stop_threshold_mbps": 0}, "run-hist")
+
+        self.assertEqual("", reason)
+        history = manager.read_speed_history()
+        self.assertEqual(3, len(history))
+        for node in candidates:
+            records = history[node["id"]]
+            self.assertEqual(1, len(records))
+            self.assertEqual(1700000000, records[0]["t"])
+            self.assertEqual(3.5, records[0]["mbps"])
+            self.assertEqual("ok", records[0]["msg"])
+            self.assertEqual("run-hist", records[0]["run_id"])
+
+    def test_speed_stage_survives_history_write_failure(self) -> None:
+        candidates = self.write_nodes(3)
+
+        def fake_measure(node, settings, run_id):
+            return {"id": node["id"], "speed_mbps": 2.0, "speed_tested_at": 1700000000.0,
+                    "speed_message": "", "speed_run_id": run_id}
+
+        manager.pipeline_cancel_event.clear()
+        with mock.patch.object(manager, "measure_node_speed", side_effect=fake_measure), \
+                mock.patch.object(manager, "append_speed_history", side_effect=OSError("disk full")), \
+                mock.patch.object(manager, "log_to_json"):
+            reason = manager.run_speed_stage(candidates, {"stop_threshold_mbps": 0}, "run-broken")
+
+        # 测速不中断：3 个节点全部测完，nodes.json 正常写回
+        self.assertEqual("", reason)
+        stored = {n["id"]: n for n in manager.read_nodes()}
+        self.assertEqual(3, sum(1 for n in stored.values() if n.get("speed_mbps") == 2.0))
+        self.assertEqual({}, manager.read_speed_history())
+
     def test_speed_stage_cancel_keeps_results_and_skips_switch(self) -> None:
         candidates = self.write_nodes(3)
         manager.update_ui_config(connection_enabled=False, speedtest={"retest_after_hours": 0, "auto_switch_fastest": True})
