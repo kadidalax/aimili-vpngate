@@ -198,7 +198,6 @@ last_collector_heartbeat = 0.0
 last_checker_heartbeat = 0.0
 
 PIPELINE_TRIGGERS = ("periodic", "manual_update", "manual_speedtest", "forced")
-PIPELINE_STAGES = ("idle", "fetch", "probe", "speedtest", "switch")
 RUNTIME_STATE_KEYS = ("pipeline", "singbox_exit", "global_exit", "speedtest_settings", "check_interval_hours", "speed_history")
 
 def new_pipeline_status() -> dict[str, Any]:
@@ -560,10 +559,6 @@ try:
         UI_HOST = _init_cfg["host"]
 except Exception:
     pass
-
-def get_session_token(password: str, username: str = "admin") -> str:
-    salt = "aimilivpn_secure_salt_2026"
-    return hashlib.sha256((username + ":" + password + salt).encode("utf-8")).hexdigest()
 
 _last_cleanup_time = 0.0
 
@@ -1062,20 +1057,6 @@ def check_latest_release() -> dict[str, Any]:
         "update_command": UPDATE_COMMAND,
     }
 
-def is_certificate_verification_error(exc: BaseException) -> bool:
-    import ssl
-
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, ssl.SSLCertVerificationError):
-            return True
-        reason = getattr(current, "reason", None)
-        cause = getattr(current, "__cause__", None)
-        current = reason if isinstance(reason, BaseException) else cause
-    return False
-
 def parse_vpngate_rows(text: str) -> list[dict[str, str]]:
     return snapshot_utils.parse_and_validate_snapshot(text, max_rows=MAX_SCAN_ROWS)
 
@@ -1375,9 +1356,6 @@ def fetch_candidates() -> list[dict[str, Any]]:
     if last_err:
         raise RuntimeError(diag_msg) from last_err
     raise RuntimeError(diag_msg)
-
-def cached_nodes() -> list[dict[str, Any]]:
-    return read_nodes()
 
 _openvpn_version = None
 
