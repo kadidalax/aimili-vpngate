@@ -3942,19 +3942,21 @@ INDEX_HTML = r"""<!doctype html>
       transition: all 0.3s ease;
       width: 100%;
       box-sizing: border-box;
+      min-height: 164px; /* 常态保持 164px 固定观感；内容装不下时自然增高，绝不裁剪 */
     }
     
     .active-card-info {
       display: flex;
       align-items: center;
       gap: 20px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap; /* 图标与信息始终同排，meta 在列内换行 */
     }
     
     .active-card-details {
       display: flex;
       flex-direction: column;
       gap: 6px;
+      min-width: 0;
     }
     
     .active-card-title {
@@ -3976,8 +3978,9 @@ INDEX_HTML = r"""<!doctype html>
     
     .active-card-meta {
       display: flex;
-      gap: 16px;
+      gap: 2px 16px; /* 行距收紧，两行 meta 时保持紧凑 */
       font-size: 13px;
+      line-height: 1.5;
       color: var(--text-secondary);
       flex-wrap: wrap;
     }
@@ -4585,6 +4588,29 @@ INDEX_HTML = r"""<!doctype html>
       .active-card button {
         width: 100%;
       }
+      .active-card-title {
+        flex-wrap: wrap;
+      }
+      .active-card .active-card-task {
+        max-width: 100%;
+        width: 100%;
+        min-width: 0; /* 放开桌面保底宽度，小屏不横向溢出 */
+        padding-left: 0;
+        padding-top: 12px;
+        border-left: none;
+        border-top: 1px solid rgba(99, 102, 241, 0.18);
+        text-align: left;
+      }
+      .active-card .active-card-task .pipeline-running,
+      .active-card .active-card-task .pipeline-head,
+      .active-card .active-card-task .pipeline-idle,
+      .active-card .active-card-task .pipeline-stages {
+        align-items: flex-start;
+        justify-content: flex-start; /* 媒体块位于基础规则之前，需更高特异度才能覆盖 flex-end */
+      }
+      .active-card-meta {
+        gap: 8px 16px;
+      }
       button, .btn-telegram {
         min-height: 44px;
       }
@@ -4902,10 +4928,23 @@ INDEX_HTML = r"""<!doctype html>
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .pipeline-panel.idle {
-      padding: 10px 16px;
-      border-color: var(--border-color);
-      animation: none;
+    .active-card-task {
+      display: none;
+      max-width: 44%;
+      min-width: 360px; /* 保底宽度：桌面端文案行与进度行单行放下，卡片保底高度内完整显示 */
+      box-sizing: border-box;
+      padding-left: 24px;
+      border-left: 1px solid rgba(99, 102, 241, 0.18);
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-align: right;
+    }
+    .active-card-task .pipeline-idle {
+      justify-content: flex-end;
+    }
+    .active-card-task .pipeline-stages {
+      margin: 0;
+      justify-content: flex-end;
     }
     .pipeline-idle {
       display: flex;
@@ -4919,14 +4958,27 @@ INDEX_HTML = r"""<!doctype html>
       margin: 0 4px;
       opacity: 0.5;
     }
-    .pipeline-panel {
-      display: none;
-      background: rgba(22, 30, 49, 0.97);
-      border: 1px solid rgba(99, 102, 241, 0.35);
-      border-radius: 16px;
-      padding: 16px 20px;
-      margin-bottom: 20px;
-      animation: modalFadeIn 0.25s ease-out;
+    .pipeline-running {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+      width: 100%;
+    }
+    .pipeline-running > * {
+      max-width: 100%;
+    }
+    .pipeline-head {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pipeline-details {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-secondary);
     }
 
     .pipeline-stages {
@@ -5082,11 +5134,8 @@ INDEX_HTML = r"""<!doctype html>
 </header>
 <main>
   
-    <!-- 当前连接活动节点卡片 -->
+    <!-- 当前连接活动节点卡片（含拉取/测速任务槽 pipeline_panel） -->
     <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
-      <!-- Rendered dynamically by render() -->
-    </section>
-    <section id="pipeline_panel" class="pipeline-panel" aria-live="polite">
       <!-- Rendered dynamically by render() -->
     </section>
 
@@ -6006,6 +6055,7 @@ function render(){
             </div>
           </div>
         </div>
+        <div class="active-card-task" id="pipeline_panel" aria-live="polite"></div>
       </div>
     `;
   } else if (activeNode) {
@@ -6024,6 +6074,10 @@ function render(){
             <div class="active-card-title">
               <span class="badge available"><span class="badge-pulse"></span>已连接</span>
               <strong>${declaredFlag ? `${esc(declaredFlag)} ` : ""}${esc(translateCountry(activeNode.country))} 节点</strong>
+              <button class="btn-danger" ${disconnectInFlight ? "disabled" : ""} style="height: 30px; padding: 0 12px; border-radius: 8px; font-size: 12px;" onclick="disconnectNode()">
+                <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                断开连接
+              </button>
             </div>
             <div class="active-card-value mono" style="font-size: 20px; margin-top: 2px;">
               ${esc(activeNode.ip || activeNode.remote_host)}:${activeNode.remote_port || ""}
@@ -6037,10 +6091,7 @@ function render(){
             </div>
           </div>
         </div>
-        <button class="btn-danger" ${disconnectInFlight ? "disabled" : ""} style="height: 38px; padding: 0 16px; border-radius: 8px;" onclick="disconnectNode()">
-          <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-          断开连接
-        </button>
+        <div class="active-card-task" id="pipeline_panel" aria-live="polite"></div>
       </div>
     `;
   } else {
@@ -6061,6 +6112,7 @@ function render(){
             </div>
           </div>
         </div>
+        <div class="active-card-task" id="pipeline_panel" aria-live="polite"></div>
       </div>
     `;
   }
@@ -7271,7 +7323,6 @@ function renderPipelinePanel() {
       return;
     }
     panel.style.display = "block";
-    panel.classList.add("idle");
     setHtmlIfChanged(panel, `<div class="pipeline-idle">${parts.join('<span class="pipeline-sep">·</span>')}</div>`);
     return;
   }
@@ -7288,19 +7339,18 @@ function renderPipelinePanel() {
   if (pipeline.with_speedtest && (pipeline.stage === "speedtest" || pipeline.speed_total)) details.push(`测速 ${pipeline.speed_done || 0}/${pipeline.speed_total || 0}`);
   if (pipeline.current_node_id) details.push(`当前节点 ${pipeline.current_node_id}`);
   if (pipeline.best_node_id) details.push(`最快 ${pipeline.best_node_id}（${formatSpeed(pipeline.best_speed_mbps)}）`);
-  panel.classList.remove("idle");
   const stopLabel = pipeline.stop_requested ? "正在停止..." : "停止任务";
   const html = `
-    <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
-      <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0;">
-        <span style="font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+    <div class="pipeline-running">
+      <div class="pipeline-head">
+        <span style="font-size: 14px; font-weight: 600; color: var(--text-primary); display: inline-flex; align-items: center; gap: 6px;">
           <span class="badge-pulse" style="background: var(--primary);"></span>${esc(triggerLabel)}进行中
           <span style="font-size: 12px; font-weight: 400; color: var(--text-secondary);">当前连接保持不变</span>
         </span>
-        <div class="pipeline-stages">${stageHtml}</div>
-        <span style="font-size: 13px; color: var(--text-secondary);">${esc(details.join(" · ") || (pipeline.message || "正在获取节点列表..."))}</span>
+        <button type="button" class="btn-danger" ${pipeline.stop_requested ? "disabled" : ""} style="height: 30px; padding: 0 12px; border-radius: 8px; font-size: 12px;" onclick="stopPipeline()">${esc(stopLabel)}</button>
       </div>
-      <button type="button" class="btn-danger" ${pipeline.stop_requested ? "disabled" : ""} style="height: 36px; padding: 0 14px; border-radius: 8px;" onclick="stopPipeline()">${esc(stopLabel)}</button>
+      <div class="pipeline-stages">${stageHtml}</div>
+      <div class="pipeline-details">${esc(details.join(" · ") || (pipeline.message || "正在获取节点列表..."))}</div>
     </div>`;
   panel.style.display = "block";
   setHtmlIfChanged(panel, html);

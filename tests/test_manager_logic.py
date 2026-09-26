@@ -2047,6 +2047,51 @@ class ManagerLogicTests(unittest.TestCase):
         ):
             self.assertIn(text, html, text)
 
+    def test_active_card_merges_pipeline_slot(self) -> None:
+        html = manager.INDEX_HTML
+        # 拉取/测速状态并入连接卡片：独立卡片 section 移除，任务槽嵌入三个状态模板
+        self.assertNotIn('<section id="pipeline_panel"', html)
+        start = html.index('if (phase === "connecting") {')
+        mid = html.index("} else if (activeNode) {", start)
+        end = html.index("setHtmlIfChanged(activeCardContainer", mid)
+        connecting = html[start:mid]
+        connected = html[mid:end]
+        disconnected = html[html.rindex("} else {", mid, end):end]
+        for name, part in (("connecting", connecting), ("connected", connected), ("disconnected", disconnected)):
+            self.assertIn(
+                '<div class="active-card-task" id="pipeline_panel" aria-live="polite"></div>',
+                part, name,
+            )
+        # 断开按钮移入左侧连接信息块的标题行（位于 IP 行之前），右侧任务槽独占
+        self.assertIn('onclick="disconnectNode()"', connected)
+        self.assertLess(connected.index('onclick="disconnectNode()"'), connected.index('active-card-value'))
+        # 不裁剪、信息完整：卡片仅保底高度（常见宽度保持 164px 固定观感），内容超出时自然增高
+        card_css = html[html.index("    .active-card {"):]
+        card_css = card_css[:card_css.index("}")]
+        self.assertRegex(card_css, r"\bmin-height: \d+px;")
+        self.assertNotIn("overflow: hidden", card_css)
+        # meta 与进度行不做行数/长度钳制（无 max-height / 省略号裁剪）
+        meta_css = html[html.index("    .active-card-meta {"):]
+        meta_css = meta_css[:meta_css.index("}")]
+        self.assertNotIn("max-height", meta_css)
+        details_css = html[html.index("    .pipeline-details {"):]
+        details_css = details_css[:details_css.index("}")]
+        self.assertNotIn("text-overflow", details_css)
+        # 任务槽样式 + 进行中为右对齐纵排（文案行含停止按钮、阶段条、进度）
+        self.assertIn(".active-card-task {", html)
+        self.assertIn('class="pipeline-running"', html)
+        # 移动端：媒体块位于基础规则之前，行对齐覆盖须靠更高特异度；右槽保底宽度须置 0 防小屏溢出
+        media_css = html[html.index("    @media (max-width: 768px) {"):]
+        media_css = media_css[:media_css.index("\n    }")]
+        self.assertIn(".active-card .active-card-task .pipeline-idle", media_css)
+        self.assertIn("min-width: 0", media_css)
+        # 右槽桌面保底宽度：文案行/进度行单行放下 → 卡片保底高度内信息显示完整
+        slot_css = html[html.index("    .active-card-task {"):]
+        slot_css = slot_css[:slot_css.index("}")]
+        self.assertRegex(slot_css, r"\bmin-width: \d+px;")
+        # meta 项不做 nowrap：超长值项内换行，不横向溢出卡片
+        self.assertNotIn("white-space: nowrap", html[html.index("    .active-card-meta {"):html.index("    .stats {")])
+
     def test_web_dashboard_has_browser_freeze_safeguards(self) -> None:
         self.assertNotIn("backdrop-filter", manager.LOGIN_HTML)
         self.assertNotIn("backdrop-filter", manager.INDEX_HTML)
