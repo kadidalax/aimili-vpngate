@@ -265,8 +265,9 @@ def tcp_latency_ms(host: str, port: int, dev: str | None = None) -> int:
         if dev:
             try:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode("utf-8"))
-            except OSError:
-                pass
+            except (OSError, AttributeError):
+                # 绑不上指定网卡：继续未绑定 connect 会走隧道，结果会冒充本机实测
+                return 0
         s.connect((host, port))
         return max(1, int((time.time() - started) * 1000))
     except OSError:
@@ -278,31 +279,64 @@ def tcp_latency_ms(host: str, port: int, dev: str | None = None) -> int:
             except Exception:
                 pass
 
-def ping_latency_ms(host: str, port: int, fallback_ping: int = 0) -> int:
-    dev = get_physical_interface()
-    # 1. Try ping with interface binding
-    if dev:
+def default_route_via_tunnel() -> bool:
+    """任一 default 路由经隧道设备（tun/tap/wg/ppp）即视为隧道活跃。"""
+    try:
+        res = subprocess.run(["ip", "route"], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if line.startswith("default"):
+                    parts = line.split()
+                    try:
+                        dev = parts[parts.index("dev") + 1]
+                    except (ValueError, IndexError):
+                        continue
+                    if dev.startswith(("tun", "tap", "wg", "ppp")):
+                        return True
+    except Exception:
+        pass
+    return False
+
+def _route_target_address(host: str) -> str | None:
+    """把主机名/地址统一成 ip route get 可用的地址字面量。"""
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host) or ":" in host:
+        return host
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None
+    return infos[0][4][0] if infos else None
+
+def unbound_path_via_tunnel(host: str) -> bool:
+    """未绑定网卡的流量到目标是否经隧道设备（含策略路由、全局出口劫持）。
+
+    `ip route get` 走完整 FIB 规则链，能识别主表 default 之外的隧道劫持；
+    查询失败（无 ip 命令、主机名解析失败等）回退主表 default 检测。
+    """
+    target = _route_target_address(host)
+    if target:
+        cmd = ["ip", "-6", "route", "get", target] if ":" in target else ["ip", "route", "get", target]
         try:
-            cmd = ["ping", "-c", "1", "-W", "2", "-I", dev, host]
-            res = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=2
-            )
-            if res.returncode == 0:
-                match = re.search(r"time=([\d.]+)\s*ms", res.stdout)
-                if match:
-                    val = int(float(match.group(1)))
-                    if val > 0:
-                        return val
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+            if res.returncode == 0 and res.stdout:
+                parts = res.stdout.splitlines()[0].split()
+                if "dev" in parts:
+                    try:
+                        dev = parts[parts.index("dev") + 1]
+                    except (ValueError, IndexError):
+                        dev = ""
+                    if dev:
+                        return dev.startswith(("tun", "tap", "wg", "ppp"))
         except Exception:
             pass
+    return default_route_via_tunnel()
 
-    # 2. Try ping without interface binding
+def _icmp_ping_once(host: str, dev: str | None = None) -> int:
+    cmd = ["ping", "-c", "1", "-W", "2"]
+    if dev:
+        cmd += ["-I", dev]
+    cmd.append(host)
     try:
-        cmd = ["ping", "-c", "1", "-W", "2", host]
         res = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -318,16 +352,55 @@ def ping_latency_ms(host: str, port: int, fallback_ping: int = 0) -> int:
                     return val
     except Exception:
         pass
-
-    # 3. Try TCP latency check
-    tcp_val = tcp_latency_ms(host, port, dev)
-    if tcp_val > 0:
-        return tcp_val
-
-    # 4. Fallback
-    if fallback_ping > 0:
-        return fallback_ping
     return 0
+
+def _icmp_ping_samples(host: str, dev: str | None = None, samples: int = 3) -> int:
+    """采样多次取中位数；首次即失败按不可达快速返回，偶数样本取偏大值。"""
+    values: list[int] = []
+    for _ in range(max(1, samples)):
+        val = _icmp_ping_once(host, dev)
+        if val <= 0:
+            if not values:
+                return 0
+            continue
+        values.append(val)
+    if not values:
+        return 0
+    values.sort()
+    return values[len(values) // 2]
+
+def ping_latency_ms(host: str, port: int) -> int:
+    """测量本机到目标的延迟（ms）。只采信本机真实路径的测量结果。
+
+    - 绑定物理网卡的测量优先（隧道活跃时这是唯一可信路径）；
+    - 目标路由经隧道（含策略路由/全局出口劫持）时，未绑定网卡的测量
+      实际走隧道（出口→目标），不可信；
+    - 全部失败返回 0，由调用方展示为官方 Ping 预估，绝不把官方 Ping
+      冒充成本机实测。
+    """
+    dev = get_physical_interface()
+    # 网卡探测在全隧道环境会兜底返回隧道设备，该路径不可信
+    if dev and dev.startswith(("tun", "tap", "wg", "ppp")):
+        dev = None
+
+    # 1. 绑定物理网卡的测量
+    if dev:
+        val = _icmp_ping_samples(host, dev)
+        if val > 0:
+            return val
+        val = tcp_latency_ms(host, port, dev)
+        if val > 0:
+            return val
+
+    # 2. 目标路由经隧道时，未绑定网卡的测量走隧道（出口→目标），不可信
+    if unbound_path_via_tunnel(host):
+        return 0
+
+    # 3. 步骤 2 已确认未绑定路径走物理网卡：未绑定 ICMP/TCP 同样是本机真实路径
+    val = _icmp_ping_samples(host, None)
+    if val > 0:
+        return val
+    return tcp_latency_ms(host, port, None)
 
 def check_and_fix_dns() -> None:
     """

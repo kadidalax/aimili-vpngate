@@ -732,6 +732,19 @@ def parse_int(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
 
+def format_active_latency(measured_ms: int, node: dict | None = None) -> str:
+    """活动节点延迟展示：本机实测优先，失败退回官方 Ping 预估，均无则超时。
+
+    ping_latency_ms 返回 0 表示未测得本机路径，此时展示官方 Ping 必须
+    标注"预估"，不得冒充本机实测（前端 nodeLatencyHtml 同口径）。
+    """
+    if measured_ms > 0:
+        return f"{measured_ms} ms"
+    official_ping = parse_int((node or {}).get("ping"))
+    if official_ping > 0:
+        return f"~{official_ping} ms 预估"
+    return "检测超时"
+
 def proxy_basic_auth_header(username: str, password: str) -> str:
     token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return f"Proxy-Authorization: Basic {token}\r\n"
@@ -2091,7 +2104,6 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         config_text = node.get("config_text") or ""
         h = str(node.get("remote_host") or node.get("ip"))
         p = parse_int(node.get("remote_port"))
-        fallback_ping = parse_int(node.get("ping"))
 
     temp_path = test_config_path(node_id)
     try:
@@ -2100,7 +2112,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
     except Exception as e:
         raise RuntimeError(f"Failed to write temp config file: {e}")
 
-    latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
+    latency = vpn_utils.ping_latency_ms(h, p)
     
     idx = None
     try:
@@ -2181,7 +2193,6 @@ def test_multiple_nodes(
         config_text = n_info.get("config_text") or ""
         h = str(n_info.get("remote_host") or n_info.get("ip"))
         p = parse_int(n_info.get("remote_port"))
-        fallback_ping = parse_int(n_info.get("ping"))
         
         temp_path = test_config_path(node_id)
         try:
@@ -2196,7 +2207,7 @@ def test_multiple_nodes(
                 "probed_at": time.time(),
             }
             
-        latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
+        latency = vpn_utils.ping_latency_ms(h, p)
         tun_idx = None
         try:
             tun_idx = get_free_test_index()
@@ -2566,8 +2577,7 @@ def connect_node(node_id: str) -> str:
         try:
             ip = node.get("ip") or node.get("remote_host")
             port = parse_int(node.get("remote_port"))
-            fallback = parse_int(node.get("ping"))
-            latency = vpn_utils.ping_latency_ms(ip, port, fallback)
+            latency = vpn_utils.ping_latency_ms(ip, port)
             if latency > 0:
                 last_active_latency = latency
         except Exception:
@@ -2587,7 +2597,7 @@ def connect_node(node_id: str) -> str:
         if latest_ui_cfg.get("routing_mode") == "fixed_ip":
             latest_ui_cfg["fixed_node_id"] = node_id
 
-        latency_str = f"{last_active_latency} ms" if last_active_latency > 0 else "检测超时"
+        latency_str = format_active_latency(last_active_latency, node)
         with lock:
             if not connection_attempt_is_current(token, cancel_event):
                 raise ConnectionCancelled("连接操作已取消")
@@ -5851,6 +5861,55 @@ function nodeLatencyHtml(node) {
   return "-";
 }
 
+const FILTER_STORAGE_KEY = "vg_toolbar_filters_v1";
+
+function saveToolbarFilters() {
+  try {
+    const saved = {
+      status: $("status_filter") ? $("status_filter").value : "all",
+      ipType: $("ip_type_filter") ? $("ip_type_filter").value : "",
+      sort: $("sort_mode") ? $("sort_mode").value : "default",
+    };
+    // 首帧与 state 同步前集合是空的，此时落盘会在下次刷新恢复成
+    // "用户显式清空"并置 dirty，永久压制服务端 discovery_countries 同步
+    if (discoveryCountriesInitialized) {
+      saved.countries = Array.from(selectedDiscoveryCountries).sort();
+    }
+    localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(saved));
+  } catch (error) {
+    // localStorage 不可用（隐私模式等）时静默降级
+  }
+}
+
+function restoreToolbarFilters() {
+  let saved = null;
+  try {
+    const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+    saved = raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    saved = null;
+  }
+  if (!saved || typeof saved !== "object") return;
+  const applyOption = (id, value) => {
+    const el = $(id);
+    if (!el || typeof value !== "string") return;
+    if (Array.from(el.options).some(opt => opt.value === value)) el.value = value;
+  };
+  applyOption("status_filter", saved.status);
+  applyOption("ip_type_filter", saved.ipType);
+  applyOption("sort_mode", saved.sort);
+  if (Array.isArray(saved.countries)) {
+    selectedDiscoveryCountries = new Set(
+      saved.countries
+        .map(code => String(code || "").trim().toUpperCase())
+        .filter(code => /^[A-Z]{2}$/.test(code))
+    );
+    discoveryCountriesInitialized = true;
+    // 本地恢复优先：挡住轮询用 state.discovery_countries 覆盖
+    discoveryCountriesDirty = true;
+  }
+}
+
 function syncDiscoveryCountriesFromState() {
   if (discoveryCountriesInitialized && discoveryCountriesDirty) return;
   const saved = Array.isArray(state.discovery_countries) ? state.discovery_countries : [];
@@ -5934,6 +5993,7 @@ function toggleDiscoveryCountry(input) {
   if (input.checked) selectedDiscoveryCountries.add(code);
   else selectedDiscoveryCountries.delete(code);
   discoveryCountriesDirty = true;
+  saveToolbarFilters();
   currentPage = 1;
   updateCountryFilterLabel();
   render();
@@ -5943,6 +6003,7 @@ function clearDiscoveryCountries(event) {
   if (event) event.stopPropagation();
   selectedDiscoveryCountries.clear();
   discoveryCountriesDirty = true;
+  saveToolbarFilters();
   document.querySelectorAll(".country-option-input").forEach(input => {
     input.checked = false;
   });
@@ -6545,9 +6606,10 @@ document.addEventListener("keydown", event => {
     if (wasOpen) $("country_filter_button").focus();
   }
 });
-$("ip_type_filter").onchange=()=>{ currentPage = 1; render(); };
-$("status_filter").onchange=()=>{ currentPage = 1; render(); };
-if ($("sort_mode")) $("sort_mode").onchange=()=>{ currentPage = 1; render(); };
+$("ip_type_filter").onchange=()=>{ saveToolbarFilters(); currentPage = 1; render(); };
+$("status_filter").onchange=()=>{ saveToolbarFilters(); currentPage = 1; render(); };
+if ($("sort_mode")) $("sort_mode").onchange=()=>{ saveToolbarFilters(); currentPage = 1; render(); };
+restoreToolbarFilters();
 
 $("refresh").onclick=async()=>{
   refreshButtonBusy("正在启动更新...");
@@ -7109,6 +7171,17 @@ function showSpeedHistory(anchor, id) {
   const rows = speedHistoryOf(id);
   if (!rows.length) return;
   const { best, avg } = speedHistoryStats(rows);
+  const node = nodes.find(item => item && item.id === id) || null;
+  const currentParts = [];
+  if (node) {
+    const value = Number(node.speed_mbps);
+    if (Number.isFinite(value) && value > 0) {
+      currentParts.push(`${(value * 8).toFixed(1)} Mbps`);
+      currentParts.push(formatSpeed(value));
+    }
+    if (node.speed_message) currentParts.push(String(node.speed_message));
+    if (node.speed_tested_at) currentParts.push("测速时间：" + new Date(Number(node.speed_tested_at) * 1000).toLocaleString());
+  }
   const newestFirst = rows.slice(-10).reverse();
   const pad = v => String(v).padStart(2, "0");
   const lines = newestFirst.map(r => {
@@ -7122,6 +7195,7 @@ function showSpeedHistory(anchor, id) {
   }).join("");
   pop.innerHTML =
     `<div style="font-weight:600; margin-bottom:4px;">实测速度历史</div>` +
+    `<div style="margin-bottom:6px;">本次实测：${esc(currentParts.join("；") || "-")}</div>` +
     `<div style="color: var(--text-secondary); margin-bottom:6px;">最好 ${best ? best.toFixed(2) + " MB/s" : "-"} · 平均 ${avg ? avg.toFixed(2) + " MB/s" : "-"} · 共 ${rows.length} 次</div>` +
     `<div style="border-top: 1px solid var(--border-color); padding-top: 6px; display:flex; flex-direction:column; gap:3px;">${lines}</div>`;
   pop.style.display = "block";
@@ -7142,28 +7216,25 @@ function speedCellHtml(n) {
     return '<span class="speed-testing"><span class="badge-pulse" style="background: var(--warning);"></span>测速中</span>';
   }
   const historyRows = speedHistoryOf(n.id);
-  const historyAttrs = historyRows.length
+  const hasHistory = historyRows.length > 0;
+  const historyAttrs = hasHistory
     ? ` onmouseenter="showSpeedHistory(this, '${esc(n.id)}')" onmouseleave="hideSpeedHistory()"`
-    : "";
-  const historyText = historyRows.length
-    ? (() => {
-        const { best, avg } = speedHistoryStats(historyRows);
-        return `历史最好 ${best ? best.toFixed(2) : "-"} MB/s / 平均 ${avg ? avg.toFixed(2) : "-"} MB/s（${historyRows.length} 次）`;
-      })()
     : "";
   const value = Number(n.speed_mbps);
   if (!Number.isFinite(value) || value <= 0) {
     const parts = [];
     if (n.speed_message) parts.push(String(n.speed_message));
-    if (historyText) parts.push(historyText);
-    if (!parts.length) return "-";
-    return `<span title="${esc(parts.join("；"))}"${historyAttrs}>-</span>`;
+    // 有历史浮层时不再挂原生 title（原生悬浮窗会遮挡浮层，信息已并入浮层）
+    const titleAttr = hasHistory || !parts.length ? "" : ` title="${esc(parts.join("；"))}"`;
+    if (!titleAttr && !hasHistory) return "-";
+    return `<span${titleAttr}${historyAttrs}>-</span>`;
   }
   const parts = [`${(value * 8).toFixed(1)} Mbps`];
   if (n.speed_message) parts.push(String(n.speed_message));
   if (n.speed_tested_at) parts.push("测速时间：" + new Date(Number(n.speed_tested_at) * 1000).toLocaleString());
-  if (historyText) parts.push(historyText);
-  return `<span class="mono" title="${esc(parts.join("；"))}"${historyAttrs}>${esc(formatSpeed(value))}</span>`;
+  // 有历史浮层时不再挂原生 title（原生悬浮窗会遮挡浮层，信息已并入浮层）
+  const titleAttr = hasHistory ? "" : ` title="${esc(parts.join("；"))}"`;
+  return `<span class="mono"${titleAttr}${historyAttrs}>${esc(formatSpeed(value))}</span>`;
 }
 
 function renderExitStatus() {
@@ -8086,15 +8157,8 @@ def active_node_pinger() -> None:
                 if node:
                     ip = node.get("ip") or node.get("remote_host")
                     port = parse_int(node.get("remote_port"))
-                    fallback = parse_int(node.get("ping"))
-                    if ip:
-                        latency = vpn_utils.ping_latency_ms(ip, port, fallback)
-                        if latency > 0:
-                            set_state(active_node_latency=f"{latency} ms")
-                        else:
-                            set_state(active_node_latency="检测超时")
-                    else:
-                        set_state(active_node_latency="检测超时")
+                    latency = vpn_utils.ping_latency_ms(ip, port) if ip else 0
+                    set_state(active_node_latency=format_active_latency(latency, node))
                 else:
                     set_state(active_node_latency="检测超时")
             elif is_connecting:
@@ -8451,21 +8515,20 @@ class Handler(BaseHTTPRequestHandler):
                     now = time.time()
                     if now - last_active_ping_time > 15.0:
                         last_active_ping_time = now
-                        def bg_ping(ip_addr: str, port: int, fallback: int) -> None:
+                        def bg_ping(ip_addr: str, port: int) -> None:
                             global last_active_latency
                             try:
-                                latency = vpn_utils.ping_latency_ms(ip_addr, port, fallback)
-                                if latency > 0:
-                                    last_active_latency = latency
+                                # 失败也要写回 0：否则卡片会一直挂着过期的"本机实测"
+                                last_active_latency = vpn_utils.ping_latency_ms(ip_addr, port)
                             except Exception:
-                                pass
+                                last_active_latency = 0
                         threading.Thread(
                             target=bg_ping, 
-                            args=(ip, parse_int(active_node.get("remote_port")), parse_int(active_node.get("ping"))),
+                            args=(ip, parse_int(active_node.get("remote_port"))),
                             daemon=True
                         ).start()
-                    if last_active_latency > 0:
-                        active_node["latency_ms"] = last_active_latency
+                    # 0 值同样写回，nodeLatencyHtml 据此回落到官方 Ping 预估
+                    active_node["latency_ms"] = last_active_latency
             stripped_nodes = []
             for n in nodes:
                 stripped = n.copy()

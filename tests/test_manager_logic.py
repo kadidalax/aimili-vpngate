@@ -78,6 +78,25 @@ def valid_snapshot(ip: str = "198.51.100.10") -> str:
     return valid_snapshot_rows([(ip, "Japan", "JP")])
 
 
+def split_top_level_args(argument_text: str) -> list[str]:
+    """按顶层逗号切分实参，忽略嵌套括号内的逗号（如 parse_int(x), p）。"""
+    args: list[str] = []
+    depth = 0
+    current = ""
+    for char in argument_text:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            args.append(current)
+            current = ""
+            continue
+        current += char
+    args.append(current)
+    return args
+
+
 class ManagerLogicTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1843,6 +1862,206 @@ class ManagerLogicTests(unittest.TestCase):
         finally:
             manager.vpn_utils.physical_interface_cache = original_cache
 
+    def test_ping_latency_never_falls_back_to_official_ping(self) -> None:
+        # 官方 Ping 是国外探测点的预估值，绝不能冒充本机实测（否则同地区节点出现假几 ms）
+        signature = inspect.signature(manager.vpn_utils.ping_latency_ms)
+        self.assertNotIn("fallback_ping", signature.parameters)
+        with (
+            mock.patch.object(manager.vpn_utils, "get_physical_interface", return_value="eth0"),
+            mock.patch.object(manager.vpn_utils, "unbound_path_via_tunnel", return_value=False),
+            mock.patch.object(manager.vpn_utils, "_icmp_ping_samples", return_value=0),
+            mock.patch.object(manager.vpn_utils, "tcp_latency_ms", return_value=0),
+        ):
+            self.assertEqual(0, manager.vpn_utils.ping_latency_ms("198.51.100.10", 443))
+
+    def test_ping_latency_refuses_tunnel_only_measurement(self) -> None:
+        # 默认路由全走隧道且检测不到物理网卡：宁可返回 0（前端显示"预估"），也不测隧道内延迟
+        with (
+            mock.patch.object(manager.vpn_utils, "get_physical_interface", return_value=None),
+            mock.patch.object(manager.vpn_utils, "unbound_path_via_tunnel", return_value=True),
+            mock.patch.object(manager.vpn_utils, "_icmp_ping_samples") as icmp_mock,
+            mock.patch.object(manager.vpn_utils, "tcp_latency_ms") as tcp_mock,
+        ):
+            self.assertEqual(0, manager.vpn_utils.ping_latency_ms("198.51.100.10", 443))
+            icmp_mock.assert_not_called()
+            tcp_mock.assert_not_called()
+
+    def test_ping_latency_binds_physical_device_while_tunnel_active(self) -> None:
+        # 隧道活跃但物理网卡可用：只允许绑定网卡的测量，且不额外走未绑定路径
+        with (
+            mock.patch.object(manager.vpn_utils, "get_physical_interface", return_value="eth0"),
+            mock.patch.object(manager.vpn_utils, "unbound_path_via_tunnel", return_value=True),
+            mock.patch.object(manager.vpn_utils, "_icmp_ping_samples", return_value=143) as icmp_mock,
+            mock.patch.object(manager.vpn_utils, "tcp_latency_ms") as tcp_mock,
+        ):
+            self.assertEqual(143, manager.vpn_utils.ping_latency_ms("198.51.100.10", 443))
+            icmp_mock.assert_called_once_with("198.51.100.10", "eth0")
+            tcp_mock.assert_not_called()
+
+    def test_ping_latency_ignores_tunnel_device_from_interface_detection(self) -> None:
+        # 全隧道环境下 _detect_physical_interface 会兜底返回 tun 设备，该路径测量不可信
+        with (
+            mock.patch.object(manager.vpn_utils, "get_physical_interface", return_value="tun0"),
+            mock.patch.object(manager.vpn_utils, "unbound_path_via_tunnel", return_value=True),
+            mock.patch.object(manager.vpn_utils, "_icmp_ping_samples") as icmp_mock,
+            mock.patch.object(manager.vpn_utils, "tcp_latency_ms") as tcp_mock,
+        ):
+            self.assertEqual(0, manager.vpn_utils.ping_latency_ms("198.51.100.10", 443))
+            icmp_mock.assert_not_called()
+            tcp_mock.assert_not_called()
+
+    def test_ping_latency_uses_unbound_icmp_when_binding_unusable(self) -> None:
+        # 步骤 2 已确认未绑定路径就是物理网卡：绑定测量失败后，未绑定 ICMP
+        # 与未绑定 TCP 同样可信（容器/非 root 下 ping -I 缺 CAP_NET_RAW 失败、
+        # 无 -I 的 ICMP 仍可用的场景），不能只跑未绑定 TCP
+        with (
+            mock.patch.object(manager.vpn_utils, "get_physical_interface", return_value="eth0"),
+            mock.patch.object(manager.vpn_utils, "unbound_path_via_tunnel", return_value=False),
+            mock.patch.object(manager.vpn_utils, "_icmp_ping_samples", side_effect=[0, 87]) as icmp_mock,
+            mock.patch.object(manager.vpn_utils, "tcp_latency_ms", return_value=0) as tcp_mock,
+        ):
+            self.assertEqual(87, manager.vpn_utils.ping_latency_ms("198.51.100.10", 443))
+        self.assertEqual(
+            [("198.51.100.10", "eth0"), ("198.51.100.10", None)],
+            [call.args for call in icmp_mock.call_args_list],
+        )
+        # 未绑定 ICMP 已测得，未绑定 TCP 不再补测；绑定 TCP 仍按原顺序执行
+        self.assertEqual(1, tcp_mock.call_count)
+        self.assertEqual("eth0", tcp_mock.call_args.args[2])
+
+    def test_icmp_sampling_takes_median_and_fails_fast(self) -> None:
+        with mock.patch.object(
+            manager.vpn_utils, "_icmp_ping_once", side_effect=[100, 140, 120]
+        ) as once_mock:
+            self.assertEqual(120, manager.vpn_utils._icmp_ping_samples("198.51.100.10", "eth0"))
+        self.assertEqual(3, once_mock.call_count)
+        # 中途丢包继续采样，偶数样本取偏大值（宁可高估不虚报低延迟）
+        with mock.patch.object(
+            manager.vpn_utils, "_icmp_ping_once", side_effect=[100, 0, 120]
+        ) as once_mock:
+            self.assertEqual(120, manager.vpn_utils._icmp_ping_samples("198.51.100.10", "eth0"))
+        self.assertEqual(3, once_mock.call_count)
+        # 首次即失败按不可达处理，保持批量探测的失败耗时不劣化
+        with mock.patch.object(
+            manager.vpn_utils, "_icmp_ping_once", side_effect=[0]
+        ) as once_mock:
+            self.assertEqual(0, manager.vpn_utils._icmp_ping_samples("198.51.100.10", "eth0"))
+        self.assertEqual(1, once_mock.call_count)
+
+    def test_default_route_via_tunnel_flags_tunnel_defaults(self) -> None:
+        class TunnelResult:
+            returncode = 0
+            stdout = (
+                "default via 10.0.0.1 dev eth0 metric 100\n"
+                "default via 10.8.0.1 dev tun0 metric 0\n"
+            )
+
+        with mock.patch.object(manager.vpn_utils.subprocess, "run", return_value=TunnelResult()):
+            self.assertTrue(manager.vpn_utils.default_route_via_tunnel())
+
+        class PhysicalResult:
+            returncode = 0
+            stdout = "default via 10.0.0.1 dev eth0 metric 100\n"
+
+        with mock.patch.object(manager.vpn_utils.subprocess, "run", return_value=PhysicalResult()):
+            self.assertFalse(manager.vpn_utils.default_route_via_tunnel())
+
+    def test_unbound_path_via_tunnel_reads_target_route(self) -> None:
+        # 策略路由/全局出口不改主表 default，必须按目标 ip route get 判出口设备
+        class TunResult:
+            returncode = 0
+            stdout = "198.51.100.10 via 10.8.0.1 dev tun0 src 10.8.0.2 uid 0\n"
+
+        with mock.patch.object(manager.vpn_utils.subprocess, "run", return_value=TunResult()):
+            self.assertTrue(manager.vpn_utils.unbound_path_via_tunnel("198.51.100.10"))
+
+        class EthResult:
+            returncode = 0
+            stdout = "198.51.100.10 via 192.168.1.1 dev eth0 src 192.168.1.5 uid 0\n"
+
+        with mock.patch.object(manager.vpn_utils.subprocess, "run", return_value=EthResult()):
+            self.assertFalse(manager.vpn_utils.unbound_path_via_tunnel("198.51.100.10"))
+
+        # ip 命令不可用时回退主表 default 检测
+        with (
+            mock.patch.object(manager.vpn_utils.subprocess, "run", side_effect=FileNotFoundError("ip")),
+            mock.patch.object(manager.vpn_utils, "default_route_via_tunnel", return_value=True),
+        ):
+            self.assertTrue(manager.vpn_utils.unbound_path_via_tunnel("198.51.100.10"))
+
+    def test_tcp_latency_bind_failure_returns_zero(self) -> None:
+        # 绑卡失败后继续未绑定 connect 会穿隧道，测量结果冒充本机实测
+        fake_sock = mock.MagicMock()
+        fake_sock.setsockopt.side_effect = OSError("EPERM")
+        with mock.patch.object(manager.vpn_utils.socket, "socket", return_value=fake_sock):
+            self.assertEqual(0, manager.vpn_utils.tcp_latency_ms("198.51.100.10", 443, "eth0"))
+        fake_sock.connect.assert_not_called()
+
+        # 未指定网卡时不受绑卡影响，正常建立连接
+        fake_sock2 = mock.MagicMock()
+        with mock.patch.object(manager.vpn_utils.socket, "socket", return_value=fake_sock2):
+            self.assertGreaterEqual(manager.vpn_utils.tcp_latency_ms("198.51.100.10", 443), 1)
+        fake_sock2.setsockopt.assert_not_called()
+        fake_sock2.connect.assert_called_once_with(("198.51.100.10", 443))
+
+    def test_latency_zero_falls_back_to_official_ping_estimate(self) -> None:
+        # ping_latency_ms 返回 0 时按 docstring 展示官方 Ping 预估，而非"检测超时"
+        self.assertEqual("143 ms", manager.format_active_latency(143, {"ping": 23}))
+        self.assertEqual("~23 ms 预估", manager.format_active_latency(0, {"ping": 23}))
+        self.assertEqual("检测超时", manager.format_active_latency(0, {"ping": 0}))
+        self.assertEqual("检测超时", manager.format_active_latency(0, None))
+        # 连接卡片与活动节点轮询都走该展示口径
+        self.assertIn("format_active_latency(", inspect.getsource(manager.connect_node))
+        self.assertIn("format_active_latency(", inspect.getsource(manager.active_node_pinger))
+
+    def test_active_latency_not_frozen_when_measurement_fails(self) -> None:
+        # 测量失败必须立刻反映到活动节点延迟：否则卡片会一直挂着连接时的
+        # 旧值并标注"本机实测延迟"，与按最新测量给"预估"的展示口径打架
+        source = Path(manager.__file__).read_text(encoding="utf-8")
+        bg_block = source[source.index("def bg_ping("):source.index("target=bg_ping")]
+        self.assertIn("last_active_latency = vpn_utils.ping_latency_ms(ip_addr, port)", bg_block)
+        self.assertNotIn("if latency > 0", bg_block, "失败时冻结旧值会让卡片显示过期实测")
+        api_block = source[
+            source.index('elif effective_path == "/api/nodes":'):
+            source.index('elif effective_path == "/api/check_update":')
+        ]
+        self.assertIn('active_node["latency_ms"] = last_active_latency', api_block)
+        self.assertNotIn("if last_active_latency > 0:", api_block, "0 值必须写回，卡片才能回落到预估")
+
+    def test_split_top_level_args_ignores_nested_commas(self) -> None:
+        # 调用参数解析器按括号配对切分，否则嵌套调用会被误判成多参数
+        self.assertEqual(["parse_int(x)", " p"], split_top_level_args("parse_int(x), p"))
+        self.assertEqual([" a", " b", " c"], split_top_level_args(" a, b, c"))
+        self.assertEqual([""], split_top_level_args(""))
+
+    def test_latency_measurement_calls_only_pass_host_and_port(self) -> None:
+        # 所有调用点不得再传官方 Ping 兜底值；逐个按括号配对提取调用，
+        # 避免正则在嵌套括号处提前截断而漏检
+        source = Path(manager.__file__).read_text(encoding="utf-8")
+        calls: list[str] = []
+        search_from = 0
+        while True:
+            start = source.find("ping_latency_ms(", search_from)
+            if start < 0:
+                break
+            open_paren = start + len("ping_latency_ms")
+            depth = 0
+            for idx in range(open_paren, len(source)):
+                if source[idx] == "(":
+                    depth += 1
+                elif source[idx] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        calls.append(source[start:idx + 1])
+                        search_from = idx + 1
+                        break
+            else:
+                self.fail("ping_latency_ms 调用括号未闭合")
+        self.assertTrue(calls, "manager 中应存在 ping_latency_ms 调用")
+        for call in calls:
+            args = split_top_level_args(call[call.index("(") + 1:-1])
+            self.assertEqual(2, len(args), f"调用应只传 host/port: {call}")
+
     def test_forced_refresh_keeps_healthy_active_connection(self) -> None:
         process = FakeProcess()
         manager.active_openvpn_process = process
@@ -1978,6 +2197,70 @@ class ManagerLogicTests(unittest.TestCase):
         # toast 数使用服务端返回的 total（服务端按 500 截断，前端 ids 可能更长）
         fn_body = html[html.index("async function startFilteredSpeedtest"):html.index("function speedHistoryOf")]
         self.assertIn("Number(result.total)", fn_body)
+
+    def test_speed_cell_merges_title_into_history_popover(self) -> None:
+        # 原生 title 与自定义历史浮层同时悬浮会互相遮挡：有历史时只留浮层，标题内容并入浮层
+        html = manager.INDEX_HTML
+        cell_body = html[html.index("function speedCellHtml"):html.index("function renderExitStatus")]
+        pop_body = html[html.index("function showSpeedHistory"):html.index("function speedCellHtml")]
+        # title 属性只在无历史时输出
+        self.assertIn("historyRows.length", cell_body)
+        self.assertNotIn('title="${esc(parts.join("；"))}"${historyAttrs}', cell_body)
+        # title 的内容（Mbps、测速时间、消息）并入浮层
+        for text in ("本次实测", "speed_tested_at", "speed_message"):
+            self.assertIn(text, pop_body, text)
+        # 浮层仍保留历史统计
+        self.assertIn("实测速度历史", pop_body)
+        self.assertIn("speedHistoryStats", pop_body)
+
+    def test_toolbar_filters_persist_across_reload(self) -> None:
+        # 勾选/切换筛选后刷新页面会丢状态：localStorage 保存并在初始化时恢复
+        html = manager.INDEX_HTML
+        self.assertIn('const FILTER_STORAGE_KEY = "vg_toolbar_filters_v1"', html)
+        for fn_name in ("saveToolbarFilters", "restoreToolbarFilters"):
+            self.assertIn(f"function {fn_name}(", html, fn_name)
+        # 保存内容覆盖四项：状态/IP类型/排序/国家
+        save_body = html[html.index("function saveToolbarFilters("):html.index("function restoreToolbarFilters(")]
+        for text in ("status_filter", "ip_type_filter", "sort_mode", "selectedDiscoveryCountries"):
+            self.assertIn(text, save_body, text)
+        self.assertIn("localStorage.setItem", save_body)
+        # 恢复时国家集合要挡住后续 state 轮询的空值覆盖
+        restore_body = html[html.index("function restoreToolbarFilters("):html.index("function syncDiscoveryCountriesFromState(")]
+        self.assertIn("localStorage.getItem", restore_body)
+        self.assertIn("selectedDiscoveryCountries =", restore_body)
+        self.assertIn("discoveryCountriesDirty = true", restore_body)
+        self.assertIn("discoveryCountriesInitialized = true", restore_body)
+        # 三个下拉变化时保存
+        for line in ('$("ip_type_filter").onchange', '$("status_filter").onchange', '$("sort_mode").onchange'):
+            idx = html.index(line)
+            self.assertIn("saveToolbarFilters()", html[idx:html.index("\n", idx)], line)
+        # 国家勾选与清空时保存
+        for fn_name in ("toggleDiscoveryCountry", "clearDiscoveryCountries"):
+            idx = html.index(f"function {fn_name}(")
+            body = html[idx:html.index("\nfunction ", idx)]
+            self.assertIn("saveToolbarFilters()", body, fn_name)
+        # 初始化先于首次 load()，否则首帧仍是空筛选
+        self.assertLess(html.index("restoreToolbarFilters();"), html.index("load().catch("))
+        # 服务端 discovery_countries 同步链路保持（刷新节点仍带国家范围）
+        self.assertIn("discovery_countries: Array.from(selectedDiscoveryCountries).sort()", html)
+
+    def test_toolbar_countries_not_persisted_before_state_sync(self) -> None:
+        # 首帧 load() 同步前 selectedDiscoveryCountries 是空集合，落盘会恢复成
+        # "用户显式清空"，restore 再置 dirty 永久压制服务端同步（刷新后国家筛选重置）
+        html = manager.INDEX_HTML
+        save_body = html[html.index("function saveToolbarFilters("):html.index("function restoreToolbarFilters(")]
+        self.assertIn("if (discoveryCountriesInitialized)", save_body, "未同步前不得写入国家集合")
+        self.assertLess(
+            save_body.index("if (discoveryCountriesInitialized)"),
+            save_body.index("Array.from(selectedDiscoveryCountries)"),
+            "国家集合序列化必须位于 initialized 守卫内",
+        )
+        restore_body = html[html.index("function restoreToolbarFilters("):html.index("function syncDiscoveryCountriesFromState(")]
+        self.assertLess(
+            restore_body.index("if (Array.isArray(saved.countries))"),
+            restore_body.index("discoveryCountriesDirty = true"),
+            "国家恢复须被数组判断包裹",
+        )
 
     def test_node_row_has_single_speedtest_action(self) -> None:
         html = manager.INDEX_HTML
